@@ -1,5 +1,5 @@
-const CACHE='voiceledger-0.6-beta';
-const ASSETS=['./','./index.html','./styles.css?v=0.6','./app.js?v=0.6','./manifest.webmanifest','./icon-192.png?v=0.6','./icon-512.png?v=0.6','./apple-touch-icon.png?v=0.6','./favicon.png?v=0.6'];
+const CACHE='voiceledger-0.7-beta';
+const ASSETS=['./','./index.html','./styles.css?v=0.7','./app.js?v=0.7','./manifest.webmanifest','./icon-192.png?v=0.7','./icon-512.png?v=0.7','./apple-touch-icon.png?v=0.7','./favicon.png?v=0.7'];
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
 self.addEventListener('fetch',e=>{

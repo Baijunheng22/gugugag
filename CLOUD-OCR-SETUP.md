@@ -1,4 +1,6 @@
-# VoiceLedger 0.6 Beta：火山引擎免费 OCR 配置
+> **0.7 提示：** 如果你已经在 0.6 成功搭好 Cloudflare Worker 和火山 OCR，0.7 不需要重新配置这一部分。直接保留原 Worker 地址即可。
+
+# VoiceLedger 0.7 Beta：火山引擎免费 OCR 配置
 
 0.6 的图片识别链路是：
 
@@ -43,7 +45,7 @@ GitHub 页面里**不保存**火山引擎 Secret Key。
 
 ## 第三步：声账
 
-1. 打开 VoiceLedger 0.6。
+1. 打开 VoiceLedger 0.7。
 2. 设置 -> 云端视觉 OCR。
 3. 把 Worker 地址粘进去。
 4. 点“保存识别服务” -> “测试连接”。
