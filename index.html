@@ -10,13 +10,13 @@
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
   <link rel="stylesheet" href="./styles.css" />
-  <title>声账 VoiceLedger 0.2</title>
+  <title>声账 VoiceLedger 0.2.1</title>
 </head>
 <body>
   <div class="app-shell" id="app">
     <header class="topbar">
       <div>
-        <div class="eyebrow">VoiceLedger · 0.2</div>
+        <div class="eyebrow">VoiceLedger · 0.2.1</div>
         <h1>声账</h1>
       </div>
       <div class="topbar-chip">有声书</div>
@@ -101,9 +101,10 @@
           </div>
           <button class="primary-wide" id="takePhotoBtn" type="button">打开相机</button>
           <button class="secondary-wide" id="choosePhotoBtn" type="button">从相册选择</button>
+          <button class="manual-wide" id="manualRecordBtn" type="button">手动新增记录</button>
           <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
           <input id="photoInput" type="file" accept="image/*" multiple hidden />
-          <p class="helper">一次照片里可以有多条记录。识别后会先让你确认和修改。</p>
+          <p class="helper">一次照片里可以有多条记录。识别后会先让你确认和修改；拍照不方便时也可以直接手动记。</p>
         </div>
 
         <div class="ocr-progress" id="ocrProgress" hidden>

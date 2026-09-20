@@ -34,10 +34,18 @@ function secToClock(sec){
   return h ? `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
 function parseClock(v){
-  const parts=String(v||'').trim().split(':').map(Number);
+  const raw=String(v||'').trim().replace(/：/g,':');
+  if(!raw)return 0;
+  // 纯数字按“分钟”处理：25 = 25 分钟。
+  if(/^\d+(?:\.\d+)?$/.test(raw)) return Math.round(Number(raw)*60);
+  const parts=raw.split(':').map(Number);
   if(parts.some(Number.isNaN)) return 0;
-  if(parts.length===3) return parts[0]*3600+parts[1]*60+parts[2];
-  if(parts.length===2) return parts[0]*60+parts[1];
+  if(parts.length===3){
+    const [h,m,sec]=parts; if(m<0||m>59||sec<0||sec>59)return 0; return h*3600+m*60+sec;
+  }
+  if(parts.length===2){
+    const [m,sec]=parts; if(sec<0||sec>59)return 0; return m*60+sec;
+  }
   return 0;
 }
 function recordAmount(rec){
@@ -192,34 +200,132 @@ function findBookByAlias(alias){
   const n=normalizeAlias(alias); if(!n)return null;
   return state.data.books.find(b=>normalizeAlias(b.alias)===n) || state.data.books.find(b=>n.startsWith(normalizeAlias(b.alias))||normalizeAlias(b.alias).startsWith(n));
 }
+function findKnownAliasInText(text){
+  const normalized=normalizeAlias(text);
+  return [...state.data.books]
+    .filter(b=>b.alias)
+    .sort((a,b)=>normalizeAlias(b.alias).length-normalizeAlias(a.alias).length)
+    .find(b=>normalized.includes(normalizeAlias(b.alias))) || null;
+}
+function extractDuration(text){
+  const m=String(text||'').replace(/：/g,':').match(/(?:时长|duration)?\s*[:：]?\s*((?:\d{1,2}:)?\d{1,2}:\d{2})/i);
+  return m?m[1]:'';
+}
+function extractEpisodeRange(text){
+  const line=String(text||'').replace(/[—–−～~]/g,'-');
+  let m=line.match(/(\d{1,5})\s*(?:-|至|到)\s*(\d{1,5})/);
+  if(m)return {start:Number(m[1]),end:Number(m[2]),index:m.index||0,raw:m[0]};
+  // OCR 有时会把中间的横线吃掉。只有在看起来确实像文件名/已知简称时才兜底。
+  const known=findKnownAliasInText(line);
+  if(known || /(?:mp3|\.mp|白珺珩)/i.test(line)){
+    const afterAlias=known ? line.slice(Math.max(0,line.toLowerCase().indexOf(known.alias.toLowerCase())+known.alias.length)) : line;
+    m=afterAlias.match(/(\d{1,5})\s{1,4}(\d{1,5})(?!\s*[:：])/);
+    if(m){
+      const index=line.indexOf(m[0]);
+      return {start:Number(m[1]),end:Number(m[2]),index:index<0?0:index,raw:m[0]};
+    }
+  }
+  return null;
+}
+function aliasFromLine(line,ep){
+  const known=findKnownAliasInText(line); if(known)return known.alias;
+  let alias=String(line||'').slice(0,ep?.index??0).trim().replace(/^[^\u4e00-\u9fa5A-Za-z0-9]+/,'');
+  alias=alias.replace(/^(文件名|名称|name)\s*[:：]?\s*/i,'').replace(/\.mp3.*$/i,'').trim();
+  return alias;
+}
+function draftFromLine(line,imageDate,durationText=''){
+  const ep=extractEpisodeRange(line); if(!ep)return null;
+  const alias=aliasFromLine(line,ep);
+  const book=findBookByAlias(alias)||findKnownAliasInText(line);
+  return {id:uid('draft'),alias:book?.alias||alias,episodeStart:ep.start,episodeEnd:ep.end,durationText:durationText||extractDuration(line),date:imageDate,bookId:book?.id||'',sourceLine:line};
+}
 function parseOcrText(text, imageDate=todayISO()){
   const lines=String(text||'').replace(/[—–−]/g,'-').replace(/[～~]/g,'-').split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
   const out=[]; let pending=null;
-  const durationRe=/(?:^|\s)((?:\d{1,2}:)?[0-5]?\d:[0-5]\d)(?:\s|$)/;
-  const epRe=/(\d{1,5})\s*(?:-|至|到)\s*(\d{1,5})/;
   for(const raw of lines){
     const line=raw.replace(/\.mp3/ig,' .mp3 ').replace(/\s+/g,' ').trim();
-    const ep=line.match(epRe); const dur=line.match(durationRe);
-    if(ep){
-      let alias=line.slice(0,ep.index).trim().replace(/^[^\u4e00-\u9fa5A-Za-z0-9]+/,'');
-      alias=alias.replace(/^(文件名|名称|name)\s*[:：]?\s*/i,'').trim();
-      if(!alias && pending?.alias) alias=pending.alias;
-      const draft={id:uid('draft'),alias,episodeStart:Number(ep[1]),episodeEnd:Number(ep[2]),durationText:dur?dur[1]:'',date:imageDate,bookId:findBookByAlias(alias)?.id||'',sourceLine:raw};
-      out.push(draft); pending=draft;
-      continue;
-    }
-    if(dur && pending && !pending.durationText){ pending.durationText=dur[1]; continue; }
+    const d=draftFromLine(line,imageDate);
+    if(d){out.push(d);pending=d;continue;}
+    const dur=extractDuration(line);
+    if(dur && pending && !pending.durationText){pending.durationText=dur;continue;}
   }
-  // If OCR merges columns strangely, salvage range-only lines and nearby durations.
+  // OCR 把整页列顺序打乱时，至少尽可能找回“文件名 + 集数”。
   if(!out.length){
-    const all=text.replace(/[—–−～~]/g,'-').replace(/\s+/g,' ');
-    const global=/(.{1,28}?)(\d{1,5})\s*(?:-|至|到)\s*(\d{1,5}).{0,40}?((?:\d{1,2}:)?[0-5]?\d:[0-5]\d)/g;
+    const all=String(text||'').replace(/[—–−～~]/g,'-').replace(/\s+/g,' ');
+    const global=/(.{1,40}?)(\d{1,5})\s*(?:-|至|到)\s*(\d{1,5})/g;
     let m; while((m=global.exec(all))){
-      const alias=m[1].trim().split(/\s+/).slice(-2).join(' ').replace(/\.mp3/ig,'').trim();
-      out.push({id:uid('draft'),alias,episodeStart:Number(m[2]),episodeEnd:Number(m[3]),durationText:m[4],date:imageDate,bookId:findBookByAlias(alias)?.id||'',sourceLine:m[0]});
+      const line=`${m[1]} ${m[2]}-${m[3]}`;
+      const d=draftFromLine(line,imageDate); if(d)out.push(d);
     }
   }
   return out;
+}
+function parseTsvRows(tsv){
+  if(!tsv)return [];
+  const lines=String(tsv).split(/\r?\n/); if(lines.length<2)return [];
+  const header=lines[0].split('\t');
+  const idx=Object.fromEntries(header.map((h,i)=>[h,i]));
+  const words=[];
+  for(const line of lines.slice(1)){
+    if(!line.trim())continue;
+    const p=line.split('\t'); const text=p.slice(idx.text).join('\t').trim(); if(!text)continue;
+    const left=Number(p[idx.left]),top=Number(p[idx.top]),width=Number(p[idx.width]),height=Number(p[idx.height]),conf=Number(p[idx.conf]);
+    if(!Number.isFinite(left+top+width+height) || conf<15)continue;
+    words.push({text,left,top,width,height,cy:top+height/2});
+  }
+  words.sort((a,b)=>a.cy-b.cy||a.left-b.left);
+  const rows=[];
+  for(const w of words){
+    const tol=Math.max(18,w.height*0.8);
+    let row=rows.find(r=>Math.abs(r.cy-w.cy)<=Math.max(tol,r.avgH*0.8));
+    if(!row){row={words:[],cy:w.cy,avgH:w.height};rows.push(row);}
+    row.words.push(w); row.cy=row.words.reduce((a,x)=>a+x.cy,0)/row.words.length; row.avgH=row.words.reduce((a,x)=>a+x.height,0)/row.words.length;
+  }
+  return rows.map(r=>{r.words.sort((a,b)=>a.left-b.left);return {text:r.words.map(w=>w.text).join(' ').replace(/\s+/g,' ').trim(),cy:r.cy,height:r.avgH,left:Math.min(...r.words.map(w=>w.left))};}).sort((a,b)=>a.cy-b.cy);
+}
+function parseOcrTsv(tsv,imageDate=todayISO()){
+  const rows=parseTsvRows(tsv); if(!rows.length)return [];
+  const durationRows=rows.map((r,i)=>({i,row:r,duration:extractDuration(r.text)})).filter(x=>x.duration);
+  const usedDuration=new Set(); const out=[];
+  for(const row of rows){
+    const ep=extractEpisodeRange(row.text); if(!ep)continue;
+    let duration=extractDuration(row.text);
+    if(!duration){
+      let best=null;
+      for(const cand of durationRows){
+        if(usedDuration.has(cand.i))continue;
+        const dist=Math.abs(cand.row.cy-row.cy);
+        const maxDist=Math.max(80,row.height*4,cand.row.height*4);
+        if(dist<=maxDist && (!best||dist<best.dist))best={...cand,dist};
+      }
+      if(best){duration=best.duration;usedDuration.add(best.i);}
+    }
+    const d=draftFromLine(row.text,imageDate,duration); if(d)out.push(d);
+  }
+  return out;
+}
+function draftScore(list){return list.reduce((s,d)=>s+10+(d.durationText?5:0)+(d.bookId?2:0),0);}
+function chooseBestDrafts(textDrafts,visualDrafts){
+  if(!visualDrafts.length)return textDrafts;
+  if(!textDrafts.length)return visualDrafts;
+  return draftScore(visualDrafts)>=draftScore(textDrafts)?visualDrafts:textDrafts;
+}
+async function preprocessImage(file){
+  const url=URL.createObjectURL(file);
+  try{
+    const img=await new Promise((resolve,reject)=>{const i=new Image();i.onload=()=>resolve(i);i.onerror=reject;i.src=url;});
+    const srcW=img.naturalWidth||img.width,srcH=img.naturalHeight||img.height;
+    const targetW=Math.min(2200,Math.max(1600,srcW)); const scale=targetW/srcW; const targetH=Math.round(srcH*scale);
+    const canvas=document.createElement('canvas');canvas.width=targetW;canvas.height=targetH;
+    const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(img,0,0,targetW,targetH);
+    const im=ctx.getImageData(0,0,targetW,targetH),d=im.data;
+    for(let i=0;i<d.length;i+=4){
+      const y=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+      const c=Math.max(0,Math.min(255,(y-128)*1.38+138));
+      d[i]=d[i+1]=d[i+2]=c;
+    }
+    ctx.putImageData(im,0,0); return canvas;
+  }finally{URL.revokeObjectURL(url);}
 }
 async function processImages(files){
   if(!files?.length)return;
@@ -228,26 +334,34 @@ async function processImages(files){
   let worker;
   try{
     worker=await Tesseract.createWorker('chi_sim+eng',1,{logger:m=>{
-      if(m.status==='recognizing text'){ setProgress(Math.round((m.progress||0)*100),`正在识别文字…`); }
-      else if(m.status) $('#ocrProgressText').textContent='正在加载识别模型…';
+      if(m.status==='recognizing text'){setProgress(Math.round((m.progress||0)*100),'正在识别文字…');}
+      else if(m.status)$('#ocrProgressText').textContent='正在加载识别模型…';
     }});
-    await worker.setParameters({preserve_interword_spaces:'1'});
+    await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'11'});
     let drafts=[];
     for(let i=0;i<files.length;i++){
-      const f=files[i]; setProgress(0,`正在识别第 ${i+1}/${files.length} 张…`);
-      const result=await worker.recognize(f);
+      const f=files[i]; setProgress(0,`正在处理第 ${i+1}/${files.length} 张…`);
+      let source=f; try{source=await preprocessImage(f);}catch(err){console.warn('preprocess failed',err);}
+      const result=await worker.recognize(source,{}, {text:true,tsv:true});
       const d=new Date(f.lastModified||Date.now());
       const imageDate=Number.isNaN(d.getTime())?todayISO():d.toISOString().slice(0,10);
-      drafts=drafts.concat(parseOcrText(result.data.text,imageDate));
+      const textDrafts=parseOcrText(result.data.text,imageDate);
+      const visualDrafts=parseOcrTsv(result.data.tsv,imageDate);
+      drafts=drafts.concat(chooseBestDrafts(textDrafts,visualDrafts));
     }
     state.ocrDrafts=drafts.length?drafts:[blankDraft()];
     renderOcrDrafts(); $('#ocrPreview').hidden=false;
-    if(!drafts.length) toast('没自动抓到完整记录，你可以直接在结果里手动补');
-  }catch(err){console.error(err);toast('识别失败了，请换一张更清楚的照片再试');}
+    if(!drafts.length)toast('这张图没抓到完整记录，可以直接手动补');
+    else toast(`识别到 ${drafts.length} 条，先检查一下再保存`);
+  }catch(err){console.error(err);toast('识别失败了；你可以换张更清楚的照片，或直接手动新增');}
   finally{if(worker)await worker.terminate();$('#ocrProgress').hidden=true;}
 }
 function setProgress(pct,text){$('#ocrProgressPct').textContent=`${clamp(pct,0,100)}%`;$('#ocrProgressBar').style.width=`${clamp(pct,0,100)}%`;if(text)$('#ocrProgressText').textContent=text;}
 function blankDraft(){return {id:uid('draft'),alias:'',episodeStart:'',episodeEnd:'',durationText:'',date:todayISO(),bookId:''};}
+function addManualDraft(){
+  state.ocrDrafts.push(blankDraft()); renderOcrDrafts(); $('#ocrPreview').hidden=false;
+  setTimeout(()=>{const rows=document.querySelectorAll('.ocr-row');rows[rows.length-1]?.scrollIntoView({behavior:'smooth',block:'center'});},50);
+}
 function renderOcrDrafts(){
   $('#ocrRows').innerHTML=state.ocrDrafts.map((d,i)=>{
     const matched=!!d.bookId;
@@ -259,7 +373,7 @@ function renderOcrDrafts(){
         <label>日期<input type="date" data-field="date" data-id="${d.id}" value="${d.date||todayISO()}" /></label>
         <label>起始集<input type="number" inputmode="numeric" data-field="episodeStart" data-id="${d.id}" value="${d.episodeStart??''}" placeholder="394" /></label>
         <label>结束集<input type="number" inputmode="numeric" data-field="episodeEnd" data-id="${d.id}" value="${d.episodeEnd??''}" placeholder="414" /></label>
-        <label>成品时长<input inputmode="numeric" data-field="durationText" data-id="${d.id}" value="${escapeHtml(d.durationText||'')}" placeholder="25:23 或 01:25:23" /></label>
+        <label>成品时长<input inputmode="decimal" data-field="durationText" data-id="${d.id}" value="${escapeHtml(d.durationText||'')}" placeholder="25 / 25:23 / 01:25:23" /></label>
       </div>
     </div>`;
   }).join('');
@@ -267,7 +381,8 @@ function renderOcrDrafts(){
 function syncDraftFromInput(el){
   const d=state.ocrDrafts.find(x=>x.id===el.dataset.id); if(!d)return;
   d[el.dataset.field]=el.value;
-  if(el.dataset.field==='alias' && !d.bookId){d.bookId=findBookByAlias(el.value)?.id||'';renderOcrDrafts();}
+  if(el.dataset.field==='alias' && !d.bookId){const b=findBookByAlias(el.value);d.bookId=b?.id||'';if(b)renderOcrDrafts();}
+  if(el.dataset.field==='bookId' && d.bookId){const b=bookById(d.bookId);if(b){d.alias=b.alias;renderOcrDrafts();}}
 }
 function isDuplicateDraft(d){
   const sec=parseClock(d.durationText);
@@ -275,22 +390,27 @@ function isDuplicateDraft(d){
 }
 function saveOcrDrafts(){
   const valid=[];
-  for(const d of state.ocrDrafts){
-    if(!d.bookId||!d.episodeStart||!d.episodeEnd||!parseClock(d.durationText)){toast('还有记录没有填完整');return;}
-    if(Number(d.episodeEnd)<Number(d.episodeStart)){toast('结束集不能小于起始集');return;}
+  for(let i=0;i<state.ocrDrafts.length;i++){
+    const d=state.ocrDrafts[i],label=`记录 ${i+1}`;
+    if(!d.bookId){toast(`${label}：请选择归入书籍`);return;}
+    if(!String(d.episodeStart).trim()){toast(`${label}：请填写起始集`);return;}
+    if(!String(d.episodeEnd).trim()){toast(`${label}：请填写结束集`);return;}
+    if(Number(d.episodeEnd)<Number(d.episodeStart)){toast(`${label}：结束集不能小于起始集`);return;}
+    if(!parseClock(d.durationText)){toast(`${label}：成品时长格式不对，可填 25、25:23 或 01:25:23`);return;}
     valid.push(d);
   }
+  if(!valid.length){toast('还没有可保存的记录');return;}
   const duplicates=valid.filter(isDuplicateDraft);
-  if(duplicates.length && !confirm(`发现 ${duplicates.length} 条可能已经记录过。\n\n仍然保存这些重复记录吗？`)) return;
+  if(duplicates.length && !confirm(`发现 ${duplicates.length} 条可能已经记录过。\n\n仍然保存这些重复记录吗？`))return;
   valid.forEach(d=>state.data.records.push({id:uid('rec'),bookId:d.bookId,episodeStart:Number(d.episodeStart),episodeEnd:Number(d.episodeEnd),durationSec:parseClock(d.durationText),date:d.date||todayISO(),createdAt:new Date().toISOString()}));
-  state.ocrDrafts=[]; saveData(); renderOcrDrafts(); $('#ocrPreview').hidden=true; toast(`已保存 ${valid.length} 条记录`); switchView('home');
+  state.ocrDrafts=[];saveData();renderOcrDrafts();$('#ocrPreview').hidden=true;toast(`已保存 ${valid.length} 条记录`);switchView('home');
 }
 
 // Events
 $('.tabbar').addEventListener('click',e=>{const btn=e.target.closest('.tab');if(btn)switchView(btn.dataset.view);});
 $('#homeCameraBtn').addEventListener('click',()=>switchView('camera'));
 $('#homeNewBookBtn').addEventListener('click',()=>openBookForm()); $('#newBookBtn').addEventListener('click',()=>openBookForm());
-$('#takePhotoBtn').addEventListener('click',()=>$('#cameraInput').click()); $('#choosePhotoBtn').addEventListener('click',()=>$('#photoInput').click());
+$('#takePhotoBtn').addEventListener('click',()=>$('#cameraInput').click()); $('#choosePhotoBtn').addEventListener('click',()=>$('#photoInput').click()); $('#manualRecordBtn').addEventListener('click',addManualDraft);
 $('#cameraInput').addEventListener('change',e=>processImages([...e.target.files])); $('#photoInput').addEventListener('change',e=>processImages([...e.target.files]));
 $('#clearOcrBtn').addEventListener('click',()=>{state.ocrDrafts=[];$('#ocrPreview').hidden=true;}); $('#saveOcrBtn').addEventListener('click',saveOcrDrafts);
 $('#ocrRows').addEventListener('input',e=>{if(e.target.dataset.field)syncDraftFromInput(e.target)}); $('#ocrRows').addEventListener('change',e=>{if(e.target.dataset.field)syncDraftFromInput(e.target)});

@@ -69,9 +69,10 @@ h1{font-size:32px;letter-spacing:-.04em;margin-top:2px}
 .scan-visual{height:180px;border-radius:20px;background:linear-gradient(160deg,#eef2f7,#fafbfc);display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;margin-bottom:14px}
 .scan-visual span{position:relative;z-index:2;font-size:13px;color:#6b7280;font-weight:700;background:rgba(255,255,255,.74);padding:10px 13px;border-radius:999px;backdrop-filter:blur(8px)}
 .scan-lines{position:absolute;inset:20px;background:repeating-linear-gradient(180deg,transparent 0 16px,rgba(100,116,139,.11) 17px 18px);border:1px solid rgba(148,163,184,.18);border-radius:14px}
-.primary-wide,.secondary-wide{width:100%;padding:14px 16px;border-radius:16px;font-weight:800;font-size:15px}
+.primary-wide,.secondary-wide,.manual-wide{width:100%;padding:14px 16px;border-radius:16px;font-weight:800;font-size:15px}
 .primary-wide{background:#111827;color:white}
 .secondary-wide{background:#f0f2f5;color:#23272f;margin-top:8px}
+.manual-wide{background:#fff;color:#23272f;margin-top:8px;border:1px solid #dfe3e9}
 .helper{font-size:12px;color:var(--muted);line-height:1.55;margin-top:12px;text-align:center}
 .ocr-progress{margin-top:16px;background:#fff;border:1px solid var(--line);border-radius:18px;padding:14px}
 .ocr-progress-top{display:flex;justify-content:space-between;font-size:12px;color:#59616c;font-weight:700;margin-bottom:9px}
