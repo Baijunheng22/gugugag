@@ -10,13 +10,13 @@
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
   <link rel="stylesheet" href="./styles.css" />
-  <title>声账 VoiceLedger 0.2.1</title>
+  <title>声账 VoiceLedger 0.2.2</title>
 </head>
 <body>
   <div class="app-shell" id="app">
     <header class="topbar">
       <div>
-        <div class="eyebrow">VoiceLedger · 0.2.1</div>
+        <div class="eyebrow">VoiceLedger · 0.2.2</div>
         <h1>声账</h1>
       </div>
       <div class="topbar-chip">有声书</div>
@@ -83,6 +83,10 @@
           <button class="filter-chip" data-filter="paused" type="button">暂停</button>
           <button class="filter-chip" data-filter="finished" type="button">已完结</button>
         </div>
+        <div class="library-filter-grid">
+          <label>平台<select id="bookPlatformFilter"><option value="all">全部平台</option></select></label>
+          <label>甲方 / 工作室<select id="bookClientFilter"><option value="all">全部甲方</option></select></label>
+        </div>
         <div class="card-list" id="bookList"></div>
       </section>
 
@@ -143,6 +147,42 @@
           <article class="stat-big"><span>本月应收</span><strong id="statsMonthIncome">¥0.00</strong></article>
         </div>
 
+        <section class="section-block history-stats-block">
+          <div class="section-head stats-period-head">
+            <div>
+              <h2>往期统计</h2>
+              <p>以前的记录不会消失，可以按月、按年或看全部</p>
+            </div>
+            <select id="statsPeriodSelect" class="compact-select">
+              <option value="month">本月</option>
+              <option value="lastMonth">上月</option>
+              <option value="year">今年</option>
+              <option value="all">全部</option>
+              <option value="custom">指定月份</option>
+            </select>
+          </div>
+          <label id="statsCustomMonthWrap" class="month-picker" hidden>指定月份<input id="statsCustomMonth" type="month" /></label>
+          <div class="period-summary-card">
+            <div class="period-title"><span id="statsPeriodLabel">本月</span><small>工作与到账</small></div>
+            <div class="period-metrics">
+              <div><span>成品</span><strong id="statsPeriodDuration">0 分钟</strong></div>
+              <div><span>应收</span><strong id="statsPeriodReceivable">¥0.00</strong></div>
+              <div><span>实际到账</span><strong id="statsPeriodReceived">¥0.00</strong></div>
+              <div><span>记录</span><strong id="statsPeriodRecords">0 条</strong></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-head"><div><h2>按平台统计</h2><p>按当前统计周期汇总</p></div></div>
+          <div class="card-list" id="statsPlatformList"></div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-head"><div><h2>按甲方统计</h2><p>按当前统计周期汇总，点一下可跳到对应书库</p></div></div>
+          <div class="card-list" id="statsClientList"></div>
+        </section>
+
         <section class="section-block">
           <div class="section-head">
             <div>
@@ -153,6 +193,22 @@
           <div class="card-list" id="statsBookList"></div>
         </section>
       </section>
+
+      <section class="view" id="view-settings" aria-labelledby="tab-settings">
+        <div class="page-head"><div><div class="eyebrow">数据与迁移</div><h2>设置</h2></div></div>
+        <section class="settings-card">
+          <h3>我的数据</h3>
+          <p>声账的数据目前保存在这台设备的浏览器里。导出备份后，可以留存、发给我检查，或带到以后版本继续使用。</p>
+          <div id="settingsDataSummary"></div>
+          <button class="primary-wide" id="exportDataBtn" type="button">导出数据备份</button>
+          <button class="secondary-wide" id="importDataBtn" type="button">导入数据备份</button>
+          <input id="importDataInput" type="file" accept="application/json,.json" hidden />
+        </section>
+        <section class="settings-card note-card">
+          <h3>0.2.2 数据说明</h3>
+          <p>跨月后，旧记录不会被删除；本月数字只是一个筛选视图。建议偶尔导出一次备份，防止浏览器缓存被清理。</p>
+        </section>
+      </section>
     </main>
 
     <nav class="tabbar" aria-label="主导航">
@@ -160,6 +216,7 @@
       <button class="tab" id="tab-books" data-view="books" type="button"><span>▤</span><b>书库</b></button>
       <button class="tab tab-camera" id="tab-camera" data-view="camera" type="button"><span class="camera-tab-icon">⌁</span><b>拍照</b></button>
       <button class="tab" id="tab-stats" data-view="stats" type="button"><span>▥</span><b>统计</b></button>
+      <button class="tab" id="tab-settings" data-view="settings" type="button"><span>⚙</span><b>设置</b></button>
     </nav>
   </div>
 

@@ -130,3 +130,28 @@ input:focus,select:focus{border-color:#9aa4b2;box-shadow:0 0 0 3px rgba(148,163,
 .toast{position:fixed;left:50%;bottom:calc(90px + env(safe-area-inset-bottom));transform:translate(-50%,20px);background:#111827;color:#fff;padding:11px 14px;border-radius:14px;font-size:13px;font-weight:700;opacity:0;pointer-events:none;transition:.2s ease;z-index:200;max-width:calc(100% - 40px);text-align:center}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 @media (min-width:700px){body:before{content:"本版本按手机优先设计";position:fixed;top:16px;left:16px;color:#9aa0a8;font-size:11px}.app-shell{border-left:1px solid #eceff2;border-right:1px solid #eceff2}}
+
+/* 0.2.2 */
+.library-filter-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0 0 12px}
+.library-filter-grid label{font-size:11px;color:var(--muted)}
+.library-filter-grid select{min-height:42px;padding:9px 10px;font-size:13px;border-radius:13px}
+.stats-period-head{align-items:center}
+.compact-select{width:auto;min-width:106px;min-height:40px;padding:8px 10px;font-size:13px;border-radius:13px}
+.month-picker{margin:0 0 10px;background:#fff;border:1px solid var(--line);padding:12px;border-radius:16px}
+.month-picker input{margin-top:2px}
+.period-summary-card{background:#111827;color:#fff;border-radius:22px;padding:17px;box-shadow:var(--shadow)}
+.period-title{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:13px}
+.period-title span{font-size:18px;font-weight:850}.period-title small{font-size:11px;color:rgba(255,255,255,.58)}
+.period-metrics{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+.period-metrics>div{background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.07);border-radius:14px;padding:10px}
+.period-metrics span{display:block;font-size:10px;color:rgba(255,255,255,.62);margin-bottom:5px}.period-metrics strong{font-size:14px}
+.group-stat-card{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:18px;padding:14px;text-align:left}
+.group-stat-card>div:first-child{min-width:0}.group-stat-card .group-label{display:block;font-size:10px;color:var(--muted);margin-bottom:4px}.group-stat-card strong{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.group-stat-card small{display:block;color:var(--muted);font-size:11px;margin-top:4px}
+.group-money{display:flex;flex-direction:column;align-items:flex-end;gap:4px;font-size:11px;color:#4b5563;white-space:nowrap}
+.settings-card{background:#fff;border:1px solid var(--line);border-radius:22px;padding:17px;box-shadow:var(--shadow);margin-bottom:14px}
+.settings-card h3{font-size:17px;margin-bottom:7px}.settings-card p{font-size:12px;line-height:1.65;color:var(--muted);margin-bottom:14px}
+.settings-summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}
+.settings-summary-grid>div{background:#f5f7f9;border-radius:14px;padding:10px;text-align:center}.settings-summary-grid span{display:block;font-size:10px;color:var(--muted);margin-bottom:4px}.settings-summary-grid strong{font-size:16px}
+.note-card{box-shadow:none}
+.tabbar{grid-template-columns:repeat(5,1fr);padding-left:8px;padding-right:8px}
+.tab{font-size:18px}.tab b{font-size:9px}
