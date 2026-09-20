@@ -160,3 +160,11 @@ input:focus,select:focus{border-color:#9aa4b2;box-shadow:0 0 0 3px rgba(148,163,
 .brand-lockup{display:flex;align-items:center;gap:10px}
 .brand-mark{width:42px;height:42px;border-radius:13px;box-shadow:0 6px 18px rgba(17,24,39,.14);flex:0 0 auto}
 @media (max-width:390px){.brand-mark{width:38px;height:38px;border-radius:12px}.brand-lockup{gap:9px}}
+.cloud-setting-label{display:flex;flex-direction:column;gap:7px;font-size:12px;font-weight:700;color:#5b6470;margin-bottom:12px}
+.cloud-setting-label input{width:100%;border:1px solid var(--line);border-radius:16px;padding:14px 13px;font:inherit;color:var(--ink);background:#fff;outline:none}
+.cloud-setting-label input:focus{border-color:#9aa6b5;box-shadow:0 0 0 3px rgba(17,24,39,.05)}
+.settings-action-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.settings-action-row .primary-wide,.settings-action-row .secondary-wide{margin:0}
+.cloud-status{margin-top:10px;padding:11px 12px;border-radius:14px;background:#f4f6f8;color:#66707c;font-size:12px;font-weight:700}
+.cloud-status.ok{background:#edf8f2;color:#167a4d}.cloud-status.bad{background:#fff1f1;color:#be3131}
+.left-helper{text-align:left;margin-top:10px}
+@media (max-width:430px){.settings-action-row{grid-template-columns:1fr}}

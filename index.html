@@ -8,15 +8,15 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="声账" />
   <link rel="manifest" href="./manifest.webmanifest" />
-  <link rel="apple-touch-icon" href="./apple-touch-icon.png?v=0.4" />
-  <link rel="icon" type="image/png" href="./favicon.png?v=0.4" />
-  <link rel="stylesheet" href="./styles.css?v=0.4" />
-  <title>声账 VoiceLedger 0.4 Beta</title>
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png?v=0.6" />
+  <link rel="icon" type="image/png" href="./favicon.png?v=0.6" />
+  <link rel="stylesheet" href="./styles.css?v=0.6" />
+  <title>声账 VoiceLedger 0.6 Beta</title>
 </head>
 <body>
   <div class="app-shell" id="app">
     <header class="topbar">
-      <div class="brand-lockup"><svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="17" fill="#111827"/><path d="M15 33h7l4-12 7 25 5-18 4 10h7" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg><div><div class="eyebrow">VoiceLedger · 0.4 Beta</div><h1>声账</h1></div></div>
+      <div class="brand-lockup"><svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="17" fill="#111827"/><path d="M15 33h7l4-12 7 25 5-18 4 10h7" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg><div><div class="eyebrow">VoiceLedger · 0.6 Beta</div><h1>声账</h1></div></div>
       <div class="topbar-chip">有声书</div>
     </header>
 
@@ -106,7 +106,7 @@
           <button class="manual-wide" id="manualRecordBtn" type="button">手动新增记录</button>
           <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
           <input id="photoInput" type="file" accept="image/*" multiple hidden />
-          <p class="helper">一次照片里可以有多条记录。识别后会先让你确认和修改；拍照不方便时也可以直接手动记。</p>
+          <p class="helper">照片会发送到你配置的云端视觉识别服务。一次照片可识别多条记录，结果仍会先让你确认和修改。</p>
         </div>
 
         <div class="ocr-progress" id="ocrProgress" hidden>
@@ -195,6 +195,18 @@
       <section class="view" id="view-settings" aria-labelledby="tab-settings">
         <div class="page-head"><div><div class="eyebrow">数据与迁移</div><h2>设置</h2></div></div>
         <section class="settings-card">
+          <h3>火山云 OCR</h3>
+          <p>0.6 使用火山引擎云端 OCR。本机只负责拍照与显示结果；云端返回文字与位置后，再按同一行整理书名、集数和时长。</p>
+          <label class="cloud-setting-label">Cloudflare Worker 地址<input id="cloudOcrEndpoint" type="url" inputmode="url" placeholder="https://voiceledger-ocr.xxx.workers.dev" /></label>
+          <div class="settings-action-row">
+            <button class="primary-wide" id="saveCloudOcrBtn" type="button">保存识别服务</button>
+            <button class="secondary-wide" id="testCloudOcrBtn" type="button">测试连接</button>
+          </div>
+          <div id="cloudOcrStatus" class="cloud-status">尚未配置</div>
+          <p class="helper left-helper">火山引擎 AK/SK 不会放进 GitHub 网页；它们只保存在 Cloudflare Worker 的 Secret 里。</p>
+        </section>
+
+        <section class="settings-card">
           <h3>我的数据</h3>
           <p>声账的数据目前保存在这台设备的浏览器里。导出备份后，可以留存、发给我检查，或带到以后版本继续使用。</p>
           <div id="settingsDataSummary"></div>
@@ -203,7 +215,7 @@
           <input id="importDataInput" type="file" accept="application/json,.json" hidden />
         </section>
         <section class="settings-card note-card">
-          <h3>0.4 Beta 数据说明</h3>
+          <h3>0.6 Beta 数据说明</h3>
           <p>跨月后，旧记录不会被删除；本月数字只是一个筛选视图。建议偶尔导出一次备份，防止浏览器缓存被清理。</p>
         </section>
       </section>
@@ -307,7 +319,6 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="./app.js?v=0.4"></script>
+  <script src="./app.js?v=0.6"></script>
 </body>
 </html>

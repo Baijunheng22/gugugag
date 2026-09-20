@@ -1,4 +1,5 @@
 const STORAGE_KEY = 'voiceledger_02_data';
+const CLOUD_OCR_ENDPOINT_KEY = 'voiceledger_cloud_ocr_endpoint';
 
 function localISODate(date = new Date()) {
   const y = date.getFullYear();
@@ -173,7 +174,7 @@ function groupedPeriodStats(key){
 }
 
 function renderAll(){
-  renderHome(); renderLibraryFilters(); renderBooks(); renderStats(); renderSettingsSummary();
+  renderHome(); renderLibraryFilters(); renderBooks(); renderStats(); renderSettingsSummary(); renderCloudOcrSettings();
   if(state.selectedDetailBookId && document.getElementById('bookDetailModal').classList.contains('open')) renderBookDetail(state.selectedDetailBookId);
 }
 function renderHome(){
@@ -525,228 +526,101 @@ function mergeObservations(...sets){
   }
   return out.sort((a,b)=>(a.cy||0)-(b.cy||0));
 }
-async function fileToCanvas(file){
+async function fileToDataUrl(file){
   const url=URL.createObjectURL(file);
   try{
     const img=await new Promise((resolve,reject)=>{const i=new Image();i.onload=()=>resolve(i);i.onerror=reject;i.src=url;});
     const srcW=img.naturalWidth||img.width,srcH=img.naturalHeight||img.height;
-    const targetW=Math.min(2200,Math.max(1500,srcW)); const scale=targetW/srcW; const targetH=Math.round(srcH*scale);
-    const canvas=document.createElement('canvas');canvas.width=targetW;canvas.height=targetH;
-    canvas.getContext('2d').drawImage(img,0,0,targetW,targetH); return canvas;
+    const maxSide=2200,scale=Math.min(1,maxSide/Math.max(srcW,srcH));
+    const w=Math.max(1,Math.round(srcW*scale)),h=Math.max(1,Math.round(srcH*scale));
+    const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
+    const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0,w,h);
+    return canvas.toDataURL('image/jpeg',0.9);
   }finally{URL.revokeObjectURL(url);}
 }
-function enhancedCanvas(source,contrast=1.34){
-  const canvas=document.createElement('canvas');canvas.width=source.width;canvas.height=source.height;
-  const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(source,0,0);
-  const im=ctx.getImageData(0,0,canvas.width,canvas.height),d=im.data;
-  for(let i=0;i<d.length;i+=4){
-    const y=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
-    const c=Math.max(0,Math.min(255,(y-128)*contrast+136));d[i]=d[i+1]=d[i+2]=c;
+function cloudEndpoint(){return String(localStorage.getItem(CLOUD_OCR_ENDPOINT_KEY)||'').trim().replace(/\/+$/,'');}
+function normalizeCloudDuration(v){
+  const raw=String(v||'').trim().replace(/：/g,':');
+  if(!raw)return '';
+  const m=raw.match(/\d{1,3}:\d{2}:\d{2}|\d{1,3}:\d{2}/);
+  if(!m)return '';
+  const sec=parseClock(m[0]); return sec?secToClock(sec):'';
+}
+function resolveCloudBook(rec){
+  const exact=String(rec.matched_alias||'').trim();
+  if(exact){
+    const b=state.data.books.find(x=>normalizeAlias(x.alias)===normalizeAlias(exact) || normalizeAlias(x.title)===normalizeAlias(exact));
+    if(b)return b;
   }
-  ctx.putImageData(im,0,0);return canvas;
+  const raw=String(rec.raw_alias||'').trim();
+  return raw?findBookByAlias(raw):null;
 }
-function cropCanvas(source,x0,y0,x1,y1,scale=2.25){
-  x0=Math.max(0,Math.floor(x0));y0=Math.max(0,Math.floor(y0));x1=Math.min(source.width,Math.ceil(x1));y1=Math.min(source.height,Math.ceil(y1));
-  const w=Math.max(1,x1-x0),h=Math.max(1,y1-y0),out=document.createElement('canvas');
-  out.width=Math.max(1,Math.round(w*scale));out.height=Math.max(1,Math.round(h*scale));
-  const ctx=out.getContext('2d');ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';ctx.drawImage(source,x0,y0,w,h,0,0,out.width,out.height);return out;
-}
-function needsAliasRetry(obs){
-  if(obs.ignored)return false;
-  const picked=aliasFromTexts(obs.texts||[],{start:obs.episodeStart,end:obs.episodeEnd,index:0});
-  if(picked.book)return false;
-  const alias=String(picked.alias||'');
-  return chineseOnly(alias).length<2 || alias.length>10;
-}
-async function improveAliasForObservation(worker,sourceCanvas,obs){
-  const padX=sourceCanvas.width*.055,padRight=sourceCanvas.width*.12;
-  const yPadTop=Math.max(18,(obs.height||28)*1.2),yPadBottom=Math.max(28,(obs.height||28)*1.8);
-  const x0=Math.max(0,(obs.left||0)-padX),x1=Math.min(sourceCanvas.width,Math.max(sourceCanvas.width*.60,(obs.right||0)+padRight));
-  const crop=cropCanvas(sourceCanvas,x0,(obs.top||0)-yPadTop,x1,(obs.bottom||0)+yPadBottom,2.5);
-  const gray=enhancedCanvas(crop,1.38);
-  const candidates=[];
-  for(const psm of ['12','7']){
-    await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:psm});
-    const r=await worker.recognize(gray,{}, {text:true});
-    const t=String(r.data.text||'').replace(/\s+/g,' ').trim(); if(t)candidates.push(t);
-    if(isIgnoredOcrLine(t))break;
-    const picked=aliasFromTexts([...(obs.texts||[]),...candidates],{start:obs.episodeStart,end:obs.episodeEnd,index:0});
-    if(picked.book)break;
+function cloudRecordsToDrafts(records,imageDate){
+  const drafts=[]; const seen=new Set();
+  for(const rec of Array.isArray(records)?records:[]){
+    if(rec?.ignored)continue;
+    let a=Number(rec?.episode_start)||0,b=Number(rec?.episode_end)||0;
+    if(a<1||b<a||b-a>5000){a=0;b=0;}
+    const durationText=normalizeCloudDuration(rec?.duration);
+    const book=resolveCloudBook(rec);
+    const rawAlias=String(rec?.raw_alias||'').trim();
+    const alias=book?.alias||String(rec?.matched_alias||'').trim()||rawAlias;
+    if(!alias&&!a&&!b&&!durationText)continue;
+    const key=[normalizeAlias(alias),a,b,durationText].join('|');
+    if(seen.has(key))continue;seen.add(key);
+    drafts.push({
+      id:uid('draft'),alias,episodeStart:a||'',episodeEnd:b||'',durationText,date:imageDate,
+      bookId:book?.id||'',sourceLine:String(rec?.raw_filename||'').trim(),ocrTexts:[String(rec?.raw_filename||'').trim()].filter(Boolean),
+      cloudConfidence:String(rec?.confidence||'')
+    });
   }
-  for(const t of candidates)if(t&&!obs.texts.includes(t))obs.texts.push(t);
-  obs.ignored=obs.ignored||candidates.some(isIgnoredOcrLine);
+  return drafts;
 }
-async function improveMissingDuration(worker,sourceCanvas,obs,prev,next){
-  const lower=prev?((prev.cy||0)+(obs.cy||0))/2:Math.max(0,(obs.top||0)-(obs.height||30)*2.5);
-  const upper=next?((obs.cy||0)+(next.cy||0))/2:Math.min(sourceCanvas.height,(obs.bottom||0)+(obs.height||30)*5.5);
-  const crop=cropCanvas(sourceCanvas,sourceCanvas.width*.52,lower,sourceCanvas.width*.98,upper,2.2);
-  const gray=enhancedCanvas(crop,1.45);
-  await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'6'});
-  const r=await worker.recognize(gray,{}, {text:true});
-  const times=String(r.data.text||'').replace(/：/g,':').match(/(?:\d{1,2}:)?\d{1,2}:\d{2}/g)||[];
-  const valid=times.map(t=>({t,sec:parseClock(t)})).filter(x=>x.sec>0).sort((a,b)=>b.t.split(':').length-a.t.split(':').length);
-  if(valid.length)obs.durationText=valid[0].t;
-}
-function observationToDraft(obs,imageDate){
-  if(obs.ignored)return null;
-  const picked=aliasFromTexts(obs.texts||[],{start:obs.episodeStart,end:obs.episodeEnd,index:0});
-  return {id:uid('draft'),alias:picked.book?.alias||picked.alias||'',episodeStart:obs.episodeStart,episodeEnd:obs.episodeEnd,durationText:obs.durationText||'',date:imageDate,bookId:picked.book?.id||'',sourceLine:picked.text||'',ocrTexts:obs.texts||[]};
-}
-function mergeDrafts(...lists){
-  const out=[];
-  const add=d=>{
-    if(!d)return;
-    const same=out.find(x=>Number(x.episodeStart)===Number(d.episodeStart)&&Number(x.episodeEnd)===Number(d.episodeEnd)&&normalizeAlias(x.alias)===normalizeAlias(d.alias));
-    if(!same){out.push(d);return;}
-    if(!same.durationText&&d.durationText)same.durationText=d.durationText;
-    if(!same.bookId&&d.bookId){same.bookId=d.bookId;same.alias=d.alias;}
-  };
-  lists.flat().forEach(add);return out;
-}
-
-function grayDetectionData(source,maxWidth=900){
-  const scale=Math.min(1,maxWidth/source.width),w=Math.max(1,Math.round(source.width*scale)),h=Math.max(1,Math.round(source.height*scale));
-  const c=document.createElement('canvas');c.width=w;c.height=h;const ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(source,0,0,w,h);
-  const data=ctx.getImageData(0,0,w,h).data,gray=new Uint8Array(w*h);
-  for(let i=0,p=0;i<data.length;i+=4,p++)gray[p]=Math.round(.299*data[i]+.587*data[i+1]+.114*data[i+2]);
-  return {gray,w,h,scale};
-}
-function dividerSupport(gray,w,h,yMid,slope,xs){
-  const xc=w/2;let hit=0;
-  for(const x of xs){
-    const yy=Math.round(yMid+slope*(x-xc)); if(yy<4||yy>=h-4)continue;
-    let best=0;
-    for(let off=-2;off<=2;off++){
-      const y=yy+off,up=gray[(y-1)*w+x],dn=gray[(y+1)*w+x];
-      const g=Math.abs(Number(dn)-Number(up)); if(g>best)best=g;
-    }
-    if(best>=14)hit++;
-  }
-  return hit/Math.max(1,xs.length);
-}
-function detectDividerChain(source){
-  const {gray,w,h,scale}=grayDetectionData(source,900),xs=[];
-  const x0=Math.round(w*.03),x1=Math.round(w*.72),samples=110;
-  for(let i=0;i<samples;i++)xs.push(Math.round(x0+(x1-x0)*i/(samples-1)));
-  const slopes=[];for(let s=-.08;s<=.0801;s+=.01)slopes.push(Number(s.toFixed(2)));
-  const yStart=Math.round(h*.18),yEnd=Math.round(h*.90),raw=[];
-  for(let y=yStart;y<yEnd;y+=2){
-    let bestSupport=0,bestSlope=0;
-    for(const slope of slopes){const support=dividerSupport(gray,w,h,y,slope,xs);if(support>bestSupport){bestSupport=support;bestSlope=slope;}}
-    raw.push({y,support:bestSupport,slope:bestSlope});
-  }
-  const peaks=[];
-  for(let i=0;i<raw.length;i++){
-    const c=raw[i];if(c.support<.85)continue;
-    let localMax=true;
-    for(let j=Math.max(0,i-5);j<=Math.min(raw.length-1,i+5);j++)if(raw[j].support>c.support+.0001){localMax=false;break;}
-    if(localMax)peaks.push(c);
-  }
-  peaks.sort((a,b)=>b.support-a.support);
-  const nms=[];
-  for(const c of peaks){if(nms.every(x=>Math.abs(x.y-c.y)>10))nms.push(c);}
-  nms.sort((a,b)=>a.y-b.y);
-  const minGap=w*.055,maxGap=w*.13,dp=[],prev=[];
-  for(let i=0;i<nms.length;i++){
-    let best={count:1,quality:nms[i].support},bestPrev=-1;
-    for(let j=0;j<i;j++){
-      const gap=nms[i].y-nms[j].y;if(gap<minGap||gap>maxGap)continue;
-      const candidate={count:dp[j].count+1,quality:dp[j].quality+nms[i].support};
-      if(candidate.count>best.count||(candidate.count===best.count&&candidate.quality>best.quality)){best=candidate;bestPrev=j;}
-    }
-    dp.push(best);prev.push(bestPrev);
-  }
-  if(!nms.length)return [];
-  let k=0;for(let i=1;i<nms.length;i++)if(dp[i].count>dp[k].count||(dp[i].count===dp[k].count&&dp[i].quality>dp[k].quality))k=i;
-  const chain=[];while(k>=0){chain.push(nms[k]);k=prev[k];}chain.reverse();
-  if(chain.length<5)return [];
-  return chain.map(c=>({y:c.y/scale,slope:c.slope,support:c.support}));
-}
-function dividerBand(source,upper,lower){
-  const xc=source.width/2,xs=[0,source.width],ysUpper=xs.map(x=>upper.y+upper.slope*(x-xc)),ysLower=xs.map(x=>lower.y+lower.slope*(x-xc));
-  const y0=Math.max(0,Math.min(...ysUpper)+2),y1=Math.min(source.height,Math.max(...ysLower)-2);
-  return cropCanvas(source,0,y0,source.width*.96,y1,1.6);
-}
-function validEpisodeRange(ep){return !!ep&&Number.isFinite(ep.start)&&Number.isFinite(ep.end)&&ep.start>=0&&ep.end>=ep.start&&ep.end-ep.start<=5000;}
-function rowLooksLikeRecord(texts,ep){const joined=(texts||[]).join(' ');return !!ep||/\.mp3|mp3|白珺珩/i.test(joined)||!!findKnownAliasInText(joined);}
-async function ocrBandText(worker,band){
-  const mild=enhancedCanvas(band,1.22);await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'6',tessedit_char_whitelist:''});
-  const r=await worker.recognize(mild,{}, {text:true});return String(r.data.text||'').replace(/\s+/g,' ').trim();
-}
-async function ocrBandAliasRetry(worker,band,existingTexts=[]){
-  const candidates=[],left=cropCanvas(band,0,0,band.width*.63,band.height,2.3),passes=[
-    {psm:'6',contrast:1.20},{psm:'11',contrast:1.30}
-  ];
-  for(const pass of passes){
-    const gray=enhancedCanvas(left,pass.contrast);await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:pass.psm,tessedit_char_whitelist:''});
-    const r=await worker.recognize(gray,{}, {text:true});const t=String(r.data.text||'').replace(/\s+/g,' ').trim();if(t)candidates.push(t);
-    const all=[...existingTexts,...candidates];if(all.some(isIgnoredOcrLine))break;
-    const ep=all.map(extractEpisodeRange).find(validEpisodeRange)||null,picked=aliasFromTexts(all,ep||{start:0,end:0,index:0});if(picked.book)break;
-  }
-  return candidates;
-}
-function bestOcrDuration(text){
-  const src=String(text||'').replace(/：/g,':');
-  const seqs=src.match(/\d{1,2}(?::\d{2}){1,3}/g)||[];
-  for(const seq of seqs){
-    const parts=seq.split(':').map(Number);
-    if(parts.length>=3){const p=parts.slice(-3),hh=p[0],mm=p[1],ss=p[2];if(Number.isFinite(hh+mm+ss)&&mm<60&&ss<60)return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;}
-    if(parts.length===2){const mm=parts[0],ss=parts[1];if(Number.isFinite(mm+ss)&&ss<60)return `${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;}
-  }
-  return '';
-}
-async function ocrBandDuration(worker,band){
-  const top=Math.max(1,Math.round(band.height*.60)),right=cropCanvas(band,band.width*.67,0,band.width*.96,top,3.0),gray=enhancedCanvas(right,1.18);
-  await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'6',tessedit_char_whitelist:'0123456789:'});
-  const r=await worker.recognize(gray,{}, {text:true});return bestOcrDuration(r.data.text||'');
-}
-async function observationFromBand(worker,band,imageDate,index,total){
-  setProgress(18+Math.round(index/Math.max(1,total)*68),`按横线逐格识别 ${index+1}/${total}…`);
-  const texts=[],base=await ocrBandText(worker,band);if(base)texts.push(base);
-  let ep=extractEpisodeRange(base);if(ep&&!validEpisodeRange(ep))ep=null;
-  let picked=aliasFromTexts(texts,ep||{start:0,end:0,index:0});
-  if(!picked.book||isIgnoredOcrLine(base)){
-    const more=await ocrBandAliasRetry(worker,band,texts);for(const t of more)if(t&&!texts.includes(t))texts.push(t);
-    if(texts.some(isIgnoredOcrLine))return null;
-    ep=texts.map(extractEpisodeRange).find(validEpisodeRange)||ep;
-    picked=aliasFromTexts(texts,ep||{start:0,end:0,index:0});
-  }
-  if(texts.some(isIgnoredOcrLine))return null;
-  if(!rowLooksLikeRecord(texts,ep))return null;
-  const durationText=(await ocrBandDuration(worker,band))||bestOcrDuration(base)||extractDuration(base);
-  return {id:uid('draft'),alias:picked.book?.alias||picked.alias||'',episodeStart:ep?.start||'',episodeEnd:ep?.end||'',durationText,date:imageDate,bookId:picked.book?.id||'',sourceLine:picked.text||base||'',ocrTexts:texts};
-}
-async function fallbackSinglePass(worker,source,imageDate){
-  await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'11',tessedit_char_whitelist:''});
-  const r=await worker.recognize(enhancedCanvas(source,1.25),{}, {text:true});return parseOcrText(r.data.text,imageDate);
+async function callCloudOcr(imageDataUrl){
+  const endpoint=cloudEndpoint();
+  if(!endpoint)throw new Error('NO_ENDPOINT');
+  const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),90000);
+  try{
+    const response=await fetch(`${endpoint}/ocr`,{
+      method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,
+      body:JSON.stringify({
+        image_data_url:imageDataUrl,
+        books:state.data.books.map(b=>({title:b.title,alias:b.alias})),
+      })
+    });
+    let data={};try{data=await response.json();}catch(_){ }
+    if(!response.ok)throw new Error(data?.error||`HTTP_${response.status}`);
+    if(!Array.isArray(data.records))throw new Error('BAD_RESPONSE');
+    return data;
+  }finally{clearTimeout(timer);}
 }
 async function processImages(files){
   if(!files?.length)return;
-  if(!window.Tesseract){toast('识别组件加载失败，请联网后重试');return;}
-  $('#ocrProgress').hidden=false;$('#ocrPreview').hidden=true;setProgress(0,'正在准备 0.4 横线分格识别…');
-  let worker;
+  if(!cloudEndpoint()){
+    toast('先到“设置”填写云端视觉 OCR 地址');switchView('settings');return;
+  }
+  $('#ocrProgress').hidden=false;$('#ocrPreview').hidden=true;setProgress(2,'正在准备照片…');
   try{
-    worker=await Tesseract.createWorker('chi_sim+eng',1,{logger:m=>{if(m.status==='recognizing text')$('#ocrProgressText').textContent='正在识别当前格子…';else if(m.status)$('#ocrProgressText').textContent='正在加载识别模型…';}});
-    let drafts=[];
+    let drafts=[],ignoredCount=0;
     for(let fi=0;fi<files.length;fi++){
-      const f=files[fi],d=new Date(f.lastModified||Date.now()),imageDate=Number.isNaN(d.getTime())?todayISO():localISODate(d),source=await fileToCanvas(f);
-      setProgress(4,`第 ${fi+1}/${files.length} 张：先检测横向分隔线…`);
-      const dividers=detectDividerChain(source);
-      console.info('[VoiceLedger 0.4] divider chain',dividers.map(x=>({y:Math.round(x.y),support:Number(x.support.toFixed(2))})));
-      if(dividers.length>=5){
-        const bands=[];for(let i=0;i<dividers.length-1;i++)bands.push(dividerBand(source,dividers[i],dividers[i+1]));
-        let imageDrafts=[];
-        for(let i=0;i<bands.length;i++){const draft=await observationFromBand(worker,bands[i],imageDate,i,bands.length);if(draft)imageDrafts.push(draft);}
-        drafts=drafts.concat(imageDrafts);
-      }else{
-        setProgress(20,`第 ${fi+1}/${files.length} 张：横线不足，使用单次兜底识别…`);drafts=drafts.concat(await fallbackSinglePass(worker,source,imageDate));
-      }
+      const f=files[fi],d=new Date(f.lastModified||Date.now()),imageDate=Number.isNaN(d.getTime())?todayISO():localISODate(d);
+      setProgress(8+Math.round(fi/files.length*72),`第 ${fi+1}/${files.length} 张：正在上传给火山云 OCR…`);
+      const imageDataUrl=await fileToDataUrl(f);
+      setProgress(16+Math.round(fi/files.length*72),`第 ${fi+1}/${files.length} 张：正在识别文字并配对书名、集数和时长…`);
+      const result=await callCloudOcr(imageDataUrl);
+      ignoredCount+=Number(result.ignored_count)||0;
+      drafts=drafts.concat(cloudRecordsToDrafts(result.records,imageDate));
     }
     state.ocrDrafts=drafts.length?drafts:[blankDraft()];refreshDraftBookMatches();renderOcrDrafts();$('#ocrPreview').hidden=false;
-    if(!drafts.length)toast('没有抓到可用记录，可以用手动入口补录');
-    else toast(`识别到 ${drafts.length} 条；0.4 已按横线切成独立格子后再识别`);
-  }catch(err){console.error(err);toast('识别失败了；可以先手动录入，照片保留后续继续调');}
-  finally{if(worker)await worker.terminate();$('#ocrProgress').hidden=true;}
+    setProgress(100,'识别完成');
+    if(!drafts.length)toast('云端没有抓到可用记录，可以手动补录');
+    else toast(`云端识别到 ${drafts.length} 条${ignoredCount?`，过滤 ${ignoredCount} 条返音`:''}`);
+  }catch(err){
+    console.error(err);
+    if(err?.name==='AbortError')toast('云端识别超时，请检查网络后重试');
+    else if(err?.message==='NO_ENDPOINT')toast('先在设置里配置云端识别地址');
+    else toast(`云端识别失败：${String(err?.message||'请检查服务设置')}`);
+  }finally{$('#ocrProgress').hidden=true;}
 }
 function setProgress(pct,text){$('#ocrProgressPct').textContent=`${clamp(pct,0,100)}%`;$('#ocrProgressBar').style.width=`${clamp(pct,0,100)}%`;if(text)$('#ocrProgressText').textContent=text;}
 function blankDraft(){return {id:uid('draft'),alias:'',episodeStart:'',episodeEnd:'',durationText:'',date:todayISO(),bookId:''};}
@@ -808,8 +682,33 @@ function saveOcrDrafts(){
   state.ocrDrafts=[];saveData();renderOcrDrafts();$('#ocrPreview').hidden=true;toast(`已保存 ${valid.length} 条记录`);switchView('home');
 }
 
+function renderCloudOcrSettings(){
+  const input=$('#cloudOcrEndpoint'),status=$('#cloudOcrStatus'); if(!input||!status)return;
+  const ep=cloudEndpoint(); if(document.activeElement!==input)input.value=ep;
+  status.textContent=ep?'已保存识别服务地址':'尚未配置'; status.className=`cloud-status ${ep?'ok':''}`;
+}
+function saveCloudOcrEndpoint(){
+  const input=$('#cloudOcrEndpoint'); if(!input)return;
+  const value=String(input.value||'').trim().replace(/\/+$/,'');
+  if(value && !/^https:\/\//i.test(value)){toast('识别服务地址需要以 https:// 开头');return;}
+  if(value)localStorage.setItem(CLOUD_OCR_ENDPOINT_KEY,value);else localStorage.removeItem(CLOUD_OCR_ENDPOINT_KEY);
+  renderCloudOcrSettings();toast(value?'云端识别地址已保存':'已清除云端识别地址');
+}
+async function testCloudOcrEndpoint(){
+  const input=$('#cloudOcrEndpoint'),status=$('#cloudOcrStatus'); if(!input||!status)return;
+  const value=String(input.value||'').trim().replace(/\/+$/,'');
+  if(!value){toast('先填写识别服务地址');return;}
+  status.textContent='正在测试连接…';status.className='cloud-status';
+  try{
+    const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),12000);
+    const r=await fetch(`${value}/health`,{signal:controller.signal});clearTimeout(timer);
+    const data=await r.json();if(!r.ok||!data.ok)throw new Error(data?.error||`HTTP_${r.status}`);
+    localStorage.setItem(CLOUD_OCR_ENDPOINT_KEY,value);status.textContent=`连接正常 · ${data.provider||data.model||'云端 OCR'}`;status.className='cloud-status ok';toast('火山云 OCR 已连接');
+  }catch(err){status.textContent=`连接失败：${String(err?.message||'无法访问')}`;status.className='cloud-status bad';toast('云端识别服务没有连通');}
+}
+
 function exportBackup(){
-  const payload={app:'VoiceLedger',version:'0.4-beta',exportedAt:new Date().toISOString(),data:state.data};
+  const payload={app:'VoiceLedger',version:'0.6-beta',exportedAt:new Date().toISOString(),data:state.data};
   const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json;charset=utf-8'});
   const url=URL.createObjectURL(blob); const a=document.createElement('a');
   a.href=url; a.download=`VoiceLedger-backup-${todayISO()}.json`; document.body.appendChild(a); a.click(); a.remove();
@@ -841,6 +740,7 @@ $('#bookPlatformFilter').addEventListener('change',e=>{state.platformFilter=e.ta
 $('#bookClientFilter').addEventListener('change',e=>{state.clientFilter=e.target.value;renderBooks();});
 $('#statsPeriodSelect').addEventListener('change',e=>{state.statsPeriod=e.target.value;renderStats();});
 $('#statsCustomMonth').addEventListener('change',e=>{state.statsCustomMonth=e.target.value||currentYM();state.statsPeriod='custom';$('#statsPeriodSelect').value='custom';renderStats();});
+$('#saveCloudOcrBtn').addEventListener('click',saveCloudOcrEndpoint); $('#testCloudOcrBtn').addEventListener('click',testCloudOcrEndpoint);
 $('#exportDataBtn').addEventListener('click',exportBackup); $('#importDataBtn').addEventListener('click',()=>$('#importDataInput').click());
 $('#importDataInput').addEventListener('change',e=>{importBackupFile(e.target.files?.[0]);e.target.value='';});
 document.addEventListener('click',e=>{
