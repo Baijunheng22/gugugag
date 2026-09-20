@@ -385,8 +385,11 @@ function findKnownAliasInText(text){
     .find(b=>normalized.includes(normalizeAlias(b.alias))) || null;
 }
 function isIgnoredOcrLine(text){
-  const t=String(text||'').replace(/\s+/g,'');
+  const raw=String(text||''),t=raw.replace(/\s+/g,'');
   if(/返音|反音/.test(t))return true;
+  const ep=extractEpisodeRange(raw),prefix=ep?raw.slice(0,Math.max(0,ep.index||0)):raw;
+  const pcn=chineseOnly(prefix),known=findKnownAliasInText(raw);
+  if(!known && (pcn==='音'||pcn==='返音'||pcn==='反音'||(pcn.length<=3&&(levenshtein(pcn,'返音')<=1||levenshtein(pcn,'反音')<=1))))return true;
   const cn=chineseOnly(t);
   if(cn && cn.length<=4 && (levenshtein(cn,'返音')<=1 || levenshtein(cn,'反音')<=1))return true;
   if((cn.includes('返')||cn.includes('反'))&&cn.includes('音'))return true;
@@ -398,8 +401,8 @@ function extractDuration(text){
 }
 function extractEpisodeRange(text){
   const line=String(text||'').replace(/[—–−～~]/g,'-');
-  let m=line.match(/(\d{1,5})\s*(?:-|至|到)\s*(\d{1,5})/);
-  if(m)return {start:Number(m[1]),end:Number(m[2]),index:m.index||0,raw:m[0]};
+  let m=line.match(/(\d(?:\s*\d){0,4})\s*(?:-|至|到)\s*(\d(?:\s*\d){0,4})/);
+  if(m){const a=Number(m[1].replace(/\s+/g,'')),b=Number(m[2].replace(/\s+/g,''));return {start:a,end:b,index:m.index||0,raw:m[0]};}
   const known=findKnownAliasInText(line);
   if(known || /(?:mp3|\.mp|白珺珩)/i.test(line)){
     const afterAlias=known ? line.slice(Math.max(0,line.toLowerCase().indexOf(known.alias.toLowerCase())+known.alias.length)) : line;
@@ -600,48 +603,148 @@ function mergeDrafts(...lists){
   };
   lists.flat().forEach(add);return out;
 }
+
+function grayDetectionData(source,maxWidth=900){
+  const scale=Math.min(1,maxWidth/source.width),w=Math.max(1,Math.round(source.width*scale)),h=Math.max(1,Math.round(source.height*scale));
+  const c=document.createElement('canvas');c.width=w;c.height=h;const ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(source,0,0,w,h);
+  const data=ctx.getImageData(0,0,w,h).data,gray=new Uint8Array(w*h);
+  for(let i=0,p=0;i<data.length;i+=4,p++)gray[p]=Math.round(.299*data[i]+.587*data[i+1]+.114*data[i+2]);
+  return {gray,w,h,scale};
+}
+function dividerSupport(gray,w,h,yMid,slope,xs){
+  const xc=w/2;let hit=0;
+  for(const x of xs){
+    const yy=Math.round(yMid+slope*(x-xc)); if(yy<4||yy>=h-4)continue;
+    let best=0;
+    for(let off=-2;off<=2;off++){
+      const y=yy+off,up=gray[(y-1)*w+x],dn=gray[(y+1)*w+x];
+      const g=Math.abs(Number(dn)-Number(up)); if(g>best)best=g;
+    }
+    if(best>=14)hit++;
+  }
+  return hit/Math.max(1,xs.length);
+}
+function detectDividerChain(source){
+  const {gray,w,h,scale}=grayDetectionData(source,900),xs=[];
+  const x0=Math.round(w*.03),x1=Math.round(w*.72),samples=110;
+  for(let i=0;i<samples;i++)xs.push(Math.round(x0+(x1-x0)*i/(samples-1)));
+  const slopes=[];for(let s=-.08;s<=.0801;s+=.01)slopes.push(Number(s.toFixed(2)));
+  const yStart=Math.round(h*.18),yEnd=Math.round(h*.90),raw=[];
+  for(let y=yStart;y<yEnd;y+=2){
+    let bestSupport=0,bestSlope=0;
+    for(const slope of slopes){const support=dividerSupport(gray,w,h,y,slope,xs);if(support>bestSupport){bestSupport=support;bestSlope=slope;}}
+    raw.push({y,support:bestSupport,slope:bestSlope});
+  }
+  const peaks=[];
+  for(let i=0;i<raw.length;i++){
+    const c=raw[i];if(c.support<.85)continue;
+    let localMax=true;
+    for(let j=Math.max(0,i-5);j<=Math.min(raw.length-1,i+5);j++)if(raw[j].support>c.support+.0001){localMax=false;break;}
+    if(localMax)peaks.push(c);
+  }
+  peaks.sort((a,b)=>b.support-a.support);
+  const nms=[];
+  for(const c of peaks){if(nms.every(x=>Math.abs(x.y-c.y)>10))nms.push(c);}
+  nms.sort((a,b)=>a.y-b.y);
+  const minGap=w*.055,maxGap=w*.13,dp=[],prev=[];
+  for(let i=0;i<nms.length;i++){
+    let best={count:1,quality:nms[i].support},bestPrev=-1;
+    for(let j=0;j<i;j++){
+      const gap=nms[i].y-nms[j].y;if(gap<minGap||gap>maxGap)continue;
+      const candidate={count:dp[j].count+1,quality:dp[j].quality+nms[i].support};
+      if(candidate.count>best.count||(candidate.count===best.count&&candidate.quality>best.quality)){best=candidate;bestPrev=j;}
+    }
+    dp.push(best);prev.push(bestPrev);
+  }
+  if(!nms.length)return [];
+  let k=0;for(let i=1;i<nms.length;i++)if(dp[i].count>dp[k].count||(dp[i].count===dp[k].count&&dp[i].quality>dp[k].quality))k=i;
+  const chain=[];while(k>=0){chain.push(nms[k]);k=prev[k];}chain.reverse();
+  if(chain.length<5)return [];
+  return chain.map(c=>({y:c.y/scale,slope:c.slope,support:c.support}));
+}
+function dividerBand(source,upper,lower){
+  const xc=source.width/2,xs=[0,source.width],ysUpper=xs.map(x=>upper.y+upper.slope*(x-xc)),ysLower=xs.map(x=>lower.y+lower.slope*(x-xc));
+  const y0=Math.max(0,Math.min(...ysUpper)+2),y1=Math.min(source.height,Math.max(...ysLower)-2);
+  return cropCanvas(source,0,y0,source.width*.96,y1,1.6);
+}
+function validEpisodeRange(ep){return !!ep&&Number.isFinite(ep.start)&&Number.isFinite(ep.end)&&ep.start>=0&&ep.end>=ep.start&&ep.end-ep.start<=5000;}
+function rowLooksLikeRecord(texts,ep){const joined=(texts||[]).join(' ');return !!ep||/\.mp3|mp3|白珺珩/i.test(joined)||!!findKnownAliasInText(joined);}
+async function ocrBandText(worker,band){
+  const mild=enhancedCanvas(band,1.22);await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'6',tessedit_char_whitelist:''});
+  const r=await worker.recognize(mild,{}, {text:true});return String(r.data.text||'').replace(/\s+/g,' ').trim();
+}
+async function ocrBandAliasRetry(worker,band,existingTexts=[]){
+  const candidates=[],left=cropCanvas(band,0,0,band.width*.63,band.height,2.3),passes=[
+    {psm:'6',contrast:1.20},{psm:'11',contrast:1.30}
+  ];
+  for(const pass of passes){
+    const gray=enhancedCanvas(left,pass.contrast);await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:pass.psm,tessedit_char_whitelist:''});
+    const r=await worker.recognize(gray,{}, {text:true});const t=String(r.data.text||'').replace(/\s+/g,' ').trim();if(t)candidates.push(t);
+    const all=[...existingTexts,...candidates];if(all.some(isIgnoredOcrLine))break;
+    const ep=all.map(extractEpisodeRange).find(validEpisodeRange)||null,picked=aliasFromTexts(all,ep||{start:0,end:0,index:0});if(picked.book)break;
+  }
+  return candidates;
+}
+function bestOcrDuration(text){
+  const src=String(text||'').replace(/：/g,':');
+  const seqs=src.match(/\d{1,2}(?::\d{2}){1,3}/g)||[];
+  for(const seq of seqs){
+    const parts=seq.split(':').map(Number);
+    if(parts.length>=3){const p=parts.slice(-3),hh=p[0],mm=p[1],ss=p[2];if(Number.isFinite(hh+mm+ss)&&mm<60&&ss<60)return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;}
+    if(parts.length===2){const mm=parts[0],ss=parts[1];if(Number.isFinite(mm+ss)&&ss<60)return `${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;}
+  }
+  return '';
+}
+async function ocrBandDuration(worker,band){
+  const top=Math.max(1,Math.round(band.height*.60)),right=cropCanvas(band,band.width*.67,0,band.width*.96,top,3.0),gray=enhancedCanvas(right,1.18);
+  await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'6',tessedit_char_whitelist:'0123456789:'});
+  const r=await worker.recognize(gray,{}, {text:true});return bestOcrDuration(r.data.text||'');
+}
+async function observationFromBand(worker,band,imageDate,index,total){
+  setProgress(18+Math.round(index/Math.max(1,total)*68),`按横线逐格识别 ${index+1}/${total}…`);
+  const texts=[],base=await ocrBandText(worker,band);if(base)texts.push(base);
+  let ep=extractEpisodeRange(base);if(ep&&!validEpisodeRange(ep))ep=null;
+  let picked=aliasFromTexts(texts,ep||{start:0,end:0,index:0});
+  if(!picked.book||isIgnoredOcrLine(base)){
+    const more=await ocrBandAliasRetry(worker,band,texts);for(const t of more)if(t&&!texts.includes(t))texts.push(t);
+    if(texts.some(isIgnoredOcrLine))return null;
+    ep=texts.map(extractEpisodeRange).find(validEpisodeRange)||ep;
+    picked=aliasFromTexts(texts,ep||{start:0,end:0,index:0});
+  }
+  if(texts.some(isIgnoredOcrLine))return null;
+  if(!rowLooksLikeRecord(texts,ep))return null;
+  const durationText=(await ocrBandDuration(worker,band))||bestOcrDuration(base)||extractDuration(base);
+  return {id:uid('draft'),alias:picked.book?.alias||picked.alias||'',episodeStart:ep?.start||'',episodeEnd:ep?.end||'',durationText,date:imageDate,bookId:picked.book?.id||'',sourceLine:picked.text||base||'',ocrTexts:texts};
+}
+async function fallbackSinglePass(worker,source,imageDate){
+  await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'11',tessedit_char_whitelist:''});
+  const r=await worker.recognize(enhancedCanvas(source,1.25),{}, {text:true});return parseOcrText(r.data.text,imageDate);
+}
 async function processImages(files){
   if(!files?.length)return;
   if(!window.Tesseract){toast('识别组件加载失败，请联网后重试');return;}
-  $('#ocrProgress').hidden=false;$('#ocrPreview').hidden=true;setProgress(0,'正在准备 0.3 版式识别…');
+  $('#ocrProgress').hidden=false;$('#ocrPreview').hidden=true;setProgress(0,'正在准备 0.4 横线分格识别…');
   let worker;
   try{
-    worker=await Tesseract.createWorker('chi_sim+eng',1,{logger:m=>{
-      if(m.status==='recognizing text')setProgress(Math.round((m.progress||0)*100),'正在识别这一块…');
-      else if(m.status)$('#ocrProgressText').textContent='正在加载识别模型…';
-    }});
+    worker=await Tesseract.createWorker('chi_sim+eng',1,{logger:m=>{if(m.status==='recognizing text')$('#ocrProgressText').textContent='正在识别当前格子…';else if(m.status)$('#ocrProgressText').textContent='正在加载识别模型…';}});
     let drafts=[];
     for(let fi=0;fi<files.length;fi++){
-      const f=files[fi],d=new Date(f.lastModified||Date.now()),imageDate=Number.isNaN(d.getTime())?todayISO():localISODate(d);
-      setProgress(2,`第 ${fi+1}/${files.length} 张：先找每条记录…`);
-      const original=await fileToCanvas(f),enhanced=enhancedCanvas(original,1.34);
-      await worker.setParameters({preserve_interword_spaces:'1',tessedit_pageseg_mode:'11'});
-      const passA=await worker.recognize(original,{}, {text:true,tsv:true});
-      setProgress(18,`第 ${fi+1}/${files.length} 张：复核中文和数字…`);
-      const passB=await worker.recognize(enhanced,{}, {text:true,tsv:true});
-      let observations=mergeObservations(observationsFromTsv(passA.data.tsv),observationsFromTsv(passB.data.tsv));
-      if(!observations.length){
-        const fallback=mergeDrafts(parseOcrText(passA.data.text,imageDate),parseOcrText(passB.data.text,imageDate));
-        drafts=drafts.concat(fallback);continue;
+      const f=files[fi],d=new Date(f.lastModified||Date.now()),imageDate=Number.isNaN(d.getTime())?todayISO():localISODate(d),source=await fileToCanvas(f);
+      setProgress(4,`第 ${fi+1}/${files.length} 张：先检测横向分隔线…`);
+      const dividers=detectDividerChain(source);
+      console.info('[VoiceLedger 0.4] divider chain',dividers.map(x=>({y:Math.round(x.y),support:Number(x.support.toFixed(2))})));
+      if(dividers.length>=5){
+        const bands=[];for(let i=0;i<dividers.length-1;i++)bands.push(dividerBand(source,dividers[i],dividers[i+1]));
+        let imageDrafts=[];
+        for(let i=0;i<bands.length;i++){const draft=await observationFromBand(worker,bands[i],imageDate,i,bands.length);if(draft)imageDrafts.push(draft);}
+        drafts=drafts.concat(imageDrafts);
+      }else{
+        setProgress(20,`第 ${fi+1}/${files.length} 张：横线不足，使用单次兜底识别…`);drafts=drafts.concat(await fallbackSinglePass(worker,source,imageDate));
       }
-      for(let i=0;i<observations.length;i++){
-        const obs=observations[i];
-        if(needsAliasRetry(obs)){
-          setProgress(30+Math.round((i/Math.max(1,observations.length))*35),`第 ${fi+1}/${files.length} 张：逐条复核书名 ${i+1}/${observations.length}…`);
-          await improveAliasForObservation(worker,original,obs);
-        }
-      }
-      for(let i=0;i<observations.length;i++){
-        const obs=observations[i]; if(obs.ignored||obs.durationText)continue;
-        setProgress(68+Math.round((i/Math.max(1,observations.length))*25),`第 ${fi+1}/${files.length} 张：补识别时长 ${i+1}/${observations.length}…`);
-        await improveMissingDuration(worker,original,obs,observations[i-1],observations[i+1]);
-      }
-      const imageDrafts=observations.map(o=>observationToDraft(o,imageDate)).filter(Boolean);
-      drafts=drafts.concat(imageDrafts);
     }
     state.ocrDrafts=drafts.length?drafts:[blankDraft()];refreshDraftBookMatches();renderOcrDrafts();$('#ocrPreview').hidden=false;
-    if(!drafts.length)toast('没有抓到完整记录，可以用手动入口补录');
-    else toast(`识别到 ${drafts.length} 条；0.3 已按每条记录分别配对书名、集数和时长`);
+    if(!drafts.length)toast('没有抓到可用记录，可以用手动入口补录');
+    else toast(`识别到 ${drafts.length} 条；0.4 已按横线切成独立格子后再识别`);
   }catch(err){console.error(err);toast('识别失败了；可以先手动录入，照片保留后续继续调');}
   finally{if(worker)await worker.terminate();$('#ocrProgress').hidden=true;}
 }
@@ -706,7 +809,7 @@ function saveOcrDrafts(){
 }
 
 function exportBackup(){
-  const payload={app:'VoiceLedger',version:'0.3-beta',exportedAt:new Date().toISOString(),data:state.data};
+  const payload={app:'VoiceLedger',version:'0.4-beta',exportedAt:new Date().toISOString(),data:state.data};
   const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json;charset=utf-8'});
   const url=URL.createObjectURL(blob); const a=document.createElement('a');
   a.href=url; a.download=`VoiceLedger-backup-${todayISO()}.json`; document.body.appendChild(a); a.click(); a.remove();
