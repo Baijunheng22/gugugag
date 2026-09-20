@@ -155,3 +155,8 @@ input:focus,select:focus{border-color:#9aa4b2;box-shadow:0 0 0 3px rgba(148,163,
 .note-card{box-shadow:none}
 .tabbar{grid-template-columns:repeat(5,1fr);padding-left:8px;padding-right:8px}
 .tab{font-size:18px}.tab b{font-size:9px}
+
+/* 0.3 Beta */
+.brand-lockup{display:flex;align-items:center;gap:10px}
+.brand-mark{width:42px;height:42px;border-radius:13px;box-shadow:0 6px 18px rgba(17,24,39,.14);flex:0 0 auto}
+@media (max-width:390px){.brand-mark{width:38px;height:38px;border-radius:12px}.brand-lockup{gap:9px}}
