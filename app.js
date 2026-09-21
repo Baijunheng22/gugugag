@@ -35,18 +35,49 @@ const state = {
   data: loadData(),
   workSettings: workSettingsCache,
   currentView: 'home',
+  previousView: 'home',
   bookFilter: 'all',
   platformFilter: 'all',
   clientFilter: 'all',
+  bookSort: 'default',
+  bookSortDir: 'desc',
+  settlementView: 'book',
+  settlementPlatformFilter: 'all',
+  settlementClientFilter: 'all',
+  settlementStatusFilter: 'outstanding',
+  settlementSort: 'unreceived',
+  settlementSortDir: 'desc',
   statsPeriod: 'month',
   statsCustomMonth: currentYM(),
   statsYear: Number(todayWorkDate().slice(0,4)),
   statsRangeStart: todayWorkDate(),
   statsRangeEnd: todayWorkDate(),
+  statsDimension: 'book',
+  annualYear: Number(todayWorkDate().slice(0,4)),
+  metricDetail: null,
+  metricReturnView: 'home',
   ocrDrafts: [],
   selectedDetailBookId: null,
 };
 
+function migrateLegacyWorkDates(out){
+  out.meta=out.meta&&typeof out.meta==='object'?out.meta:{};
+  if(out.meta.workDateMigration08)return;
+  let changed=0,checked=0;
+  for(const r of out.records){
+    if(!r?.createdAt || r.sourceTimestamp)continue;
+    const created=new Date(r.createdAt); if(Number.isNaN(created.getTime()))continue;
+    const stored=String(r.workDate||r.date||'');
+    const createdCalendar=localISODate(created);
+    // 只迁移“原日期就是录入当天”的旧记录；若用户曾手动指定其他日期，则保持不动。
+    if(stored && stored===createdCalendar){
+      checked++;
+      const migrated=workDateForTimestamp(created);
+      if(migrated!==stored){r.workDate=migrated;r.date=migrated;r.workDateManual=false;r.sourceTimestamp=r.createdAt;changed++;}
+    }
+  }
+  out.meta.workDateMigration08={doneAt:new Date().toISOString(),changed,checked,rule:`${workSettingsCache?.cutoff||'06:00'} cutoff`};
+}
 function normalizeDataShape(data){
   const out=data&&typeof data==='object'?data:{};
   out.books=Array.isArray(out.books)?out.books:[];
@@ -57,14 +88,19 @@ function normalizeDataShape(data){
   for(const r of out.records){
     if(!r.workDate)r.workDate=r.date||todayISO();
     if(!r.date)r.date=r.workDate;
-    if(r.workDateManual==null)r.workDateManual=true; // 0.6 及更早记录保持原日期，避免升级后跳日
+    if(r.workDateManual==null)r.workDateManual=true;
   }
+  migrateLegacyWorkDates(out);
   return out;
 }
 function loadData() {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (parsed && Array.isArray(parsed.books) && Array.isArray(parsed.records) && Array.isArray(parsed.settlements)) return normalizeDataShape(parsed);
+    if (parsed && Array.isArray(parsed.books) && Array.isArray(parsed.records) && Array.isArray(parsed.settlements)) {
+      const normalized=normalizeDataShape(parsed);
+      localStorage.setItem(STORAGE_KEY,JSON.stringify(normalized));
+      return normalized;
+    }
   } catch (_) {}
   return normalizeDataShape({ books: [], records: [], settlements: [], trashRecords: [], meta:{} });
 }
@@ -267,8 +303,68 @@ function settlementClientGroups(){
   for(const b of state.data.books){const client=String(b.client||'未填写甲方').trim()||'未填写甲方';const t=bookTotals(b.id);if(!map.has(client))map.set(client,{client,receivable:0,received:0,unreceived:0,books:[]});const g=map.get(client);g.receivable+=t.receivable;g.received+=t.received;g.unreceived+=t.unreceived;g.books.push({book:b,totals:t});}
   return [...map.values()].filter(g=>Math.abs(g.unreceived)>0.005).sort((a,b)=>b.unreceived-a.unreceived);
 }
+function latestBookTimestamp(bookId){
+  const rs=state.data.records.filter(r=>r.bookId===bookId).map(r=>new Date(r.sourceTimestamp||r.createdAt||recordWorkDate(r)).getTime()).filter(Number.isFinite);
+  const ss=state.data.settlements.filter(x=>x.bookId===bookId).map(x=>new Date(x.createdAt||x.date).getTime()).filter(Number.isFinite);
+  return Math.max(0,...rs,...ss);
+}
+function sortDirectionLabel(dir){return dir==='asc'?'低 → 高':'高 → 低';}
+function compareValue(a,b,dir='desc'){
+  const mult=dir==='asc'?1:-1;
+  if(typeof a==='string'||typeof b==='string')return String(a??'').localeCompare(String(b??''),'zh-CN')*mult;
+  return ((Number(a)||0)-(Number(b)||0))*mult;
+}
+function sortedBooks(list){
+  const arr=list.slice(); const key=state.bookSort;
+  if(key==='default')return arr;
+  return arr.sort((a,b)=>{
+    const ta=bookTotals(a.id),tb=bookTotals(b.id);
+    const va=key==='duration'?ta.duration:key==='receivable'?ta.receivable:key==='rate'?Number(a.rate)||0:new Date(a.createdAt||0).getTime();
+    const vb=key==='duration'?tb.duration:key==='receivable'?tb.receivable:key==='rate'?Number(b.rate)||0:new Date(b.createdAt||0).getTime();
+    return compareValue(va,vb,state.bookSortDir) || a.title.localeCompare(b.title,'zh-CN');
+  });
+}
+function settlementBooksFiltered(){
+  return state.data.books.map(book=>({book,t:bookTotals(book.id)})).filter(({book,t})=>{
+    if(state.settlementPlatformFilter!=='all'&&book.platform!==state.settlementPlatformFilter)return false;
+    if(state.settlementClientFilter!=='all'&&book.client!==state.settlementClientFilter)return false;
+    const f=state.settlementStatusFilter;
+    if(f==='outstanding'&&t.unreceived<=0.005)return false;
+    if(['unpaid','partial','paid'].includes(f)&&t.settlement!==f)return false;
+    return true;
+  });
+}
+function settlementSortValue(item,key){
+  if(key==='unreceived')return item.t?.unreceived??item.unreceived??0;
+  if(key==='receivable')return item.t?.receivable??item.receivable??0;
+  if(key==='recent')return item.recent??latestBookTimestamp(item.book?.id);
+  if(key==='rate')return item.book?Number(item.book.rate)||0:Number(item.avgRate)||0;
+  return 0;
+}
+function settlementClientsFiltered(items){
+  const map=new Map();
+  for(const item of items){
+    const book=item.book,t=item.t,client=String(book.client||'未填写甲方').trim()||'未填写甲方';
+    if(!map.has(client))map.set(client,{client,receivable:0,received:0,unreceived:0,books:[],recent:0,avgRate:0});
+    const g=map.get(client);g.receivable+=t.receivable;g.received+=t.received;g.unreceived+=t.unreceived;g.books.push(item);g.recent=Math.max(g.recent,latestBookTimestamp(book.id));
+  }
+  for(const g of map.values())g.avgRate=g.books.length?g.books.reduce((a,x)=>a+(Number(x.book.rate)||0),0)/g.books.length:0;
+  return [...map.values()];
+}
+function boundsForMonth(ym=currentYM()){const [y,m]=ym.split('-').map(Number);return {start:`${ym}-01`,end:`${ym}-${String(daysInMonth(y,m)).padStart(2,'0')}`,label:ym};}
+function currentMonthRecords(){const b=boundsForMonth();return state.data.records.filter(r=>dateInBounds(recordWorkDate(r),b));}
+function recordsByBookCards(records,bounds=null){
+  const ids=[...new Set(records.map(r=>r.bookId))];
+  return ids.map(bookById).filter(Boolean).sort((a,b)=>{
+    const da=records.filter(r=>r.bookId===a.id).reduce((s,r)=>s+(Number(r.durationSec)||0),0),db=records.filter(r=>r.bookId===b.id).reduce((s,r)=>s+(Number(r.durationSec)||0),0);return db-da;
+  }).map(b=>statBookCard(b,bounds)).join('');
+}
+
 function renderAll(){
-  renderHome(); renderLibraryFilters(); renderBooks(); renderSettlementCenter(); renderStats(); renderSettingsSummary(); renderCloudOcrSettings(); renderWorkSettings(); renderExportOptions();
+  renderHome(); renderLibraryFilters(); renderBooks(); renderSettlementFilters(); renderSettlementCenter(); renderStats(); renderSettingsSummary(); renderCloudOcrSettings(); renderWorkSettings(); renderExportOptions(); renderChangelog();
+  if(state.currentView==='stats-history')renderStatsHistory();
+  if(state.currentView==='stats-annual')renderAnnualReport();
+  if(state.currentView==='metric-detail')renderMetricDetail();
   if(state.selectedDetailBookId && document.getElementById('bookDetailModal').classList.contains('open')) renderBookDetail(state.selectedDetailBookId);
 }
 function renderGoals(td,mt){
@@ -280,101 +376,103 @@ function renderGoals(td,mt){
 }
 function renderHome(){
   const td=dayTotals(), mt=monthTotals();
-  $('#todayDuration').textContent=secToText(td.duration);
-  $('#todayIncome').textContent=`今日应收 ${money(td.income)}`;
-  $('#monthDuration').textContent=secToText(mt.duration);
-  $('#monthIncome').textContent=money(mt.income);
-  renderGoals(td,mt);
-  const active=state.data.books.filter(b=>b.status!=='finished');
-  $('#activeBooks').innerHTML=active.length?active.map(bookCard).join(''):empty('还没有正在做的书，先新建一本。');
+  $('#todayDuration').textContent=secToText(td.duration); $('#todayIncome').textContent=`今日应收 ${money(td.income)}`;
+  $('#monthDuration').textContent=secToText(mt.duration); $('#monthIncome').textContent=money(mt.income); renderGoals(td,mt);
+  const active=state.data.books.filter(b=>b.status!=='finished').sort((a,b)=>latestBookTimestamp(b.id)-latestBookTimestamp(a.id));
+  const activePreview=active.slice(0,4);
+  $('#activeBooks').innerHTML=activePreview.length?activePreview.map(bookCard).join(''):empty('还没有正在做的书，先新建一本。');
   const rs=state.data.records.filter(r=>recordWorkDate(r)===todayWorkDate()).sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
   $('#todayRecords').innerHTML=rs.length?rs.map(recordCard).join(''):empty('今天还没有记录。拍照识别或手动新增都可以开始。');
-  const undo=$('#undoLastImportBtn'),meta=state.data.meta?.lastImport;
-  if(undo){const canUndo=!!meta&&(meta.createdRecordIds?.some(id=>state.data.records.some(r=>r.id===id))||meta.replacements?.length);undo.hidden=!canUndo;}
+  const undo=$('#undoLastImportBtn'),meta=state.data.meta?.lastImport;if(undo){const canUndo=!!meta&&(meta.createdRecordIds?.some(id=>state.data.records.some(r=>r.id===id))||meta.replacements?.length);undo.hidden=!canUndo;}
 }
 function renderLibraryFilters(){
-  const p=$('#bookPlatformFilter'), c=$('#bookClientFilter'); if(!p||!c)return;
-  const platforms=uniqueSorted(state.data.books.map(b=>b.platform));
-  const clients=uniqueSorted(state.data.books.map(b=>b.client));
-  const pValue=state.platformFilter, cValue=state.clientFilter;
+  const p=$('#bookPlatformFilter'),c=$('#bookClientFilter');if(!p||!c)return;
+  const platforms=uniqueSorted(state.data.books.map(b=>b.platform)),clients=uniqueSorted(state.data.books.map(b=>b.client));
   p.innerHTML=`<option value="all">全部平台</option>${platforms.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')}`;
   c.innerHTML=`<option value="all">全部甲方</option>${clients.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')}`;
-  p.value=platforms.includes(pValue)?pValue:'all'; c.value=clients.includes(cValue)?cValue:'all';
-  state.platformFilter=p.value; state.clientFilter=c.value;
+  p.value=platforms.includes(state.platformFilter)?state.platformFilter:'all';c.value=clients.includes(state.clientFilter)?state.clientFilter:'all';state.platformFilter=p.value;state.clientFilter=c.value;
+  if($('#bookSort'))$('#bookSort').value=state.bookSort;if($('#bookSortDirection')){$('#bookSortDirection').textContent=state.bookSort==='default'?'默认':sortDirectionLabel(state.bookSortDir);$('#bookSortDirection').disabled=state.bookSort==='default';}
 }
 function renderBooks(){
-  const list=state.data.books.filter(b=>
-    (state.bookFilter==='all'||b.status===state.bookFilter) &&
-    (state.platformFilter==='all'||b.platform===state.platformFilter) &&
-    (state.clientFilter==='all'||b.client===state.clientFilter)
-  );
+  let list=state.data.books.filter(b=>(state.bookFilter==='all'||b.status===state.bookFilter)&&(state.platformFilter==='all'||b.platform===state.platformFilter)&&(state.clientFilter==='all'||b.client===state.clientFilter));
+  list=sortedBooks(list);$('#bookResultCount').textContent=`${list.length} 本 · ${state.bookSort==='default'?'默认顺序':$('#bookSort')?.selectedOptions?.[0]?.text||'已排序'}`;
   $('#bookList').innerHTML=list.length?list.map(bookCard).join(''):empty('这个分类里还没有书籍项目。');
 }
+function renderSettlementFilters(){
+  const p=$('#settlementPlatformFilter'),c=$('#settlementClientFilter');if(!p||!c)return;
+  const platforms=uniqueSorted(state.data.books.map(b=>b.platform)),clients=uniqueSorted(state.data.books.map(b=>b.client));
+  p.innerHTML=`<option value="all">全部平台</option>${platforms.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')}`;
+  c.innerHTML=`<option value="all">全部甲方</option>${clients.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')}`;
+  p.value=platforms.includes(state.settlementPlatformFilter)?state.settlementPlatformFilter:'all';c.value=clients.includes(state.settlementClientFilter)?state.settlementClientFilter:'all';state.settlementPlatformFilter=p.value;state.settlementClientFilter=c.value;
+  $('#settlementStatusFilter').value=state.settlementStatusFilter;$('#settlementSort').value=state.settlementSort;$('#settlementSortDirection').textContent=sortDirectionLabel(state.settlementSortDir);
+  document.querySelectorAll('[data-settlement-view]').forEach(b=>b.classList.toggle('active',b.dataset.settlementView===state.settlementView));
+}
 function renderSettlementCenter(){
-  const t=overallFinanceTotals();
-  if($('#settleTotalReceivable'))$('#settleTotalReceivable').textContent=money(t.receivable);
-  if($('#settleTotalReceived'))$('#settleTotalReceived').textContent=money(t.received);
-  if($('#settleTotalUnreceived'))$('#settleTotalUnreceived').textContent=money(t.unreceived);
-  const groups=settlementClientGroups();
-  if($('#settlementClientList'))$('#settlementClientList').innerHTML=groups.length?groups.map(g=>`<button class="settlement-client-card" type="button" data-settle-client="${escapeHtml(g.client)}"><div><span>甲方 / 工作室</span><strong>${escapeHtml(g.client)}</strong><small>${g.books.filter(x=>Math.abs(x.totals.unreceived)>0.005).length} 本未结清</small></div><div><span>未收</span><strong>${money(g.unreceived)}</strong><small>已收 ${money(g.received)}</small></div><span class="chev">›</span></button>`).join(''):empty('目前没有未收款。');
-  const books=state.data.books.map(b=>({book:b,t:bookTotals(b.id)})).filter(x=>x.t.unreceived>0.005).sort((a,b)=>b.t.unreceived-a.t.unreceived);
-  if($('#settlementBookList'))$('#settlementBookList').innerHTML=books.length?books.map(({book,t})=>`<article class="settlement-book-card"><button type="button" data-open-book="${book.id}"><div class="book-title">《${escapeHtml(book.title)}》</div><div class="book-meta"><span>${escapeHtml(book.client||'未填写甲方')}</span><span>·</span><span>${t.settledTo?`结至 ${t.settledTo} 集`:'尚未结算'}</span></div></button><div class="settlement-book-money"><span>未收</span><strong>${money(t.unreceived)}</strong><button type="button" data-add-settlement="${book.id}">记结算</button></div></article>`).join(''):empty('全部已结清。');
+  const total=overallFinanceTotals();$('#settleTotalReceivable').textContent=money(total.receivable);$('#settleTotalReceived').textContent=money(total.received);$('#settleTotalUnreceived').textContent=money(total.unreceived);
+  let items=settlementBooksFiltered();
+  if(state.settlementView==='client'){
+    let groups=settlementClientsFiltered(items);groups.sort((a,b)=>compareValue(settlementSortValue(a,state.settlementSort),settlementSortValue(b,state.settlementSort),state.settlementSortDir)||a.client.localeCompare(b.client,'zh-CN'));
+    $('#settlementListTitle').textContent='按甲方';$('#settlementListSub').textContent='点开甲方，继续看这个甲方的书';
+    $('#settlementList').innerHTML=groups.length?groups.map(g=>`<button class="settlement-client-card" type="button" data-settle-client="${escapeHtml(g.client)}"><div><span>甲方 / 工作室</span><strong>${escapeHtml(g.client)}</strong><small>${g.books.length} 本 · 最近合作 ${g.recent?new Date(g.recent).toLocaleDateString('zh-CN'):'—'}</small></div><div><span>未收</span><strong>${money(g.unreceived)}</strong><small>累计应收 ${money(g.receivable)}</small></div><span class="chev">›</span></button>`).join(''):empty('当前筛选条件下没有结算项目。');
+  }else{
+    items.sort((a,b)=>compareValue(settlementSortValue(a,state.settlementSort),settlementSortValue(b,state.settlementSort),state.settlementSortDir)||a.book.title.localeCompare(b.book.title,'zh-CN'));
+    $('#settlementListTitle').textContent=state.settlementStatusFilter==='outstanding'?'未结清书籍':'按书籍';$('#settlementListSub').textContent='直接看哪本书还没结，也可以按条件筛选';
+    $('#settlementList').innerHTML=items.length?items.map(({book,t})=>`<article class="settlement-book-card"><button type="button" data-open-book="${book.id}"><div class="book-title">《${escapeHtml(book.title)}》</div><div class="book-meta"><span>${escapeHtml(book.client||'未填写甲方')}</span><span>·</span><span>${escapeHtml(book.platform||'未填写平台')}</span><span class="settlement-status ${t.settlement}">${settlementLabel(t.settlement)}</span></div><div class="mini-finance"><span>应收 ${money(t.receivable)}</span><span>已收 ${money(t.received)}</span></div></button><div class="settlement-book-money"><span>未收</span><strong>${money(t.unreceived)}</strong><button type="button" data-add-settlement="${book.id}">记结算</button></div></article>`).join(''):empty('当前筛选条件下没有书籍。');
+  }
 }
 function renderYearOptions(){
-  const years=availableYears();
-  const ysel=$('#statsYearSelect'); if(ysel){ysel.innerHTML=years.map(y=>`<option value="${y}">${y} 年</option>`).join('');if(!years.includes(Number(state.statsYear)))state.statsYear=years[0];ysel.value=String(state.statsYear);}
+  const years=availableYears();if(!years.includes(Number(state.statsYear)))state.statsYear=years[0];if(!years.includes(Number(state.annualYear)))state.annualYear=years[0];
+  if($('#statsYearSelect')){$('#statsYearSelect').innerHTML=years.map(y=>`<option value="${y}">${y} 年</option>`).join('');$('#statsYearSelect').value=String(state.statsYear);}
+  if($('#annualYearSelect')){$('#annualYearSelect').innerHTML=years.map(y=>`<option value="${y}">${y} 年</option>`).join('');$('#annualYearSelect').value=String(state.annualYear);}
 }
 function renderAnnualReport(){
-  const d=annualReportData(); const el=$('#annualReport'); if(!el)return;
-  $('#annualReportSub').textContent=`${d.year} 年全年工作概览`;
+  renderYearOptions();const d=annualReportData(state.annualYear),el=$('#annualReport');if(!el)return;$('#annualReportSub').textContent=`${d.year} 年全年工作概览`;
   const maxDur=Math.max(1,...d.monthMap.map(x=>x.duration));
-  el.innerHTML=`<div class="annual-kpis"><div><span>全年成品</span><strong>${secToText(d.duration)}</strong></div><div><span>全年应收</span><strong>${money(d.receivable)}</strong></div><div><span>全年到账</span><strong>${money(d.received)}</strong></div><div><span>年末未收</span><strong>${money(d.outstanding)}</strong></div><div><span>工作天数</span><strong>${d.workDays} 天</strong></div><div><span>日均成品</span><strong>${secToText(d.avgDay)}</strong></div><div><span>月均应收</span><strong>${money(d.avgMonth)}</strong></div><div><span>涉及已完结</span><strong>${d.finishedBooks} 本</strong></div></div>
-  <div class="annual-highlights"><div><span>最忙月份</span><strong>${d.busiest?`${d.busiest.month} 月 · ${secToText(d.busiest.duration)}`:'—'}</strong></div><div><span>收入最高月份</span><strong>${d.bestIncome?`${d.bestIncome.month} 月 · ${money(d.bestIncome.receivable)}`:'—'}</strong></div><div><span>合作最多收入甲方</span><strong>${d.topClient?`${escapeHtml(d.topClient[0])} · ${money(d.topClient[1])}`:'—'}</strong></div><div><span>投入最多的书</span><strong>${d.topBook?`《${escapeHtml(d.topBook.name)}》 · ${secToText(d.topBook.duration)}`:'—'}</strong></div></div>
-  <div class="month-bars">${d.monthMap.map(m=>`<div class="month-bar" title="${m.month}月 ${secToText(m.duration)}"><i style="height:${Math.max(3,m.duration/maxDur*100)}%"></i><span>${m.month}</span></div>`).join('')}</div>`;
+  el.innerHTML=`<div class="annual-kpis"><div><span>全年成品</span><strong>${secToText(d.duration)}</strong></div><div><span>全年应收</span><strong>${money(d.receivable)}</strong></div><div><span>全年到账</span><strong>${money(d.received)}</strong></div><div><span>年末未收</span><strong>${money(d.outstanding)}</strong></div><div><span>工作天数</span><strong>${d.workDays} 天</strong></div><div><span>日均成品</span><strong>${secToText(d.avgDay)}</strong></div><div><span>月均应收</span><strong>${money(d.avgMonth)}</strong></div><div><span>涉及已完结</span><strong>${d.finishedBooks} 本</strong></div></div><div class="annual-highlights"><div><span>最忙月份</span><strong>${d.busiest?`${d.busiest.month} 月 · ${secToText(d.busiest.duration)}`:'—'}</strong></div><div><span>收入最高月份</span><strong>${d.bestIncome?`${d.bestIncome.month} 月 · ${money(d.bestIncome.receivable)}`:'—'}</strong></div><div><span>合作收入最多甲方</span><strong>${d.topClient?`${escapeHtml(d.topClient[0])} · ${money(d.topClient[1])}`:'—'}</strong></div><div><span>投入最多的书</span><strong>${d.topBook?`《${escapeHtml(d.topBook.name)}》 · ${secToText(d.topBook.duration)}`:'—'}</strong></div></div><div class="month-bars">${d.monthMap.map(m=>`<div class="month-bar" title="${m.month}月 ${secToText(m.duration)}"><i style="height:${Math.max(3,m.duration/maxDur*100)}%"></i><span>${m.month}</span></div>`).join('')}</div>`;
 }
 function renderStats(){
-  renderYearOptions();
-  const td=dayTotals(), mt=monthTotals(), pt=statsPeriodTotals();
-  if($('#statsPeriodSelect'))$('#statsPeriodSelect').value=state.statsPeriod;
-  $('#statsTodayDuration').textContent=secToText(td.duration);
-  $('#statsTodayIncome').textContent=money(td.income);
-  $('#statsMonthDuration').textContent=secToText(mt.duration);
-  $('#statsMonthIncome').textContent=money(mt.income);
-  $('#statsPeriodLabel').textContent=statsPeriodLabel();
-  $('#statsPeriodDuration').textContent=secToText(pt.duration);
-  $('#statsPeriodReceivable').textContent=money(pt.receivable);
-  $('#statsPeriodReceived').textContent=money(pt.received);
-  $('#statsPeriodOutstanding').textContent=money(pt.outstanding);
-  $('#statsPeriodRecords').textContent=`${pt.records} 条`;
-  $('#statsYearWrap').hidden=state.statsPeriod!=='yearPick';
-  $('#statsCustomMonthWrap').hidden=state.statsPeriod!=='customMonth';
-  $('#statsCustomRangeWrap').hidden=state.statsPeriod!=='customRange';
-  $('#statsCustomMonth').value=state.statsCustomMonth; $('#statsRangeStart').value=state.statsRangeStart; $('#statsRangeEnd').value=state.statsRangeEnd;
-  const quick=$('#statsMonthQuick'); if(quick){const show=state.statsPeriod==='year'||state.statsPeriod==='yearPick';quick.hidden=!show;if(show){const y=state.statsPeriod==='yearPick'?state.statsYear:Number(todayWorkDate().slice(0,4));quick.innerHTML=Array.from({length:12},(_,i)=>`<button type="button" data-quick-month="${y}-${String(i+1).padStart(2,'0')}">${i+1}月</button>`).join('');}}
-  const bounds=statsPeriodBounds();
-  const books=state.data.books.filter(b=>state.data.records.some(r=>r.bookId===b.id&&dateInBounds(recordWorkDate(r),bounds))||state.data.settlements.some(x=>x.bookId===b.id&&dateInBounds(x.date,bounds)));
-  $('#statsBookList').innerHTML=books.length?books.map(b=>statBookCard(b,bounds)).join(''):empty('这个统计周期里还没有按书数据。');
-  const ps=groupedPeriodStats('platform'), cs=groupedPeriodStats('client');
-  $('#statsPlatformList').innerHTML=ps.length?ps.map(g=>groupStatCard('platform',g)).join(''):empty('这个统计周期里还没有平台数据。');
-  $('#statsClientList').innerHTML=cs.length?cs.map(g=>groupStatCard('client',g)).join(''):empty('这个统计周期里还没有甲方数据。');
-  renderAnnualReport();
+  renderYearOptions();const td=dayTotals(),mt=monthTotals();$('#statsTodayDuration').textContent=secToText(td.duration);$('#statsTodayIncome').textContent=money(td.income);$('#statsMonthDuration').textContent=secToText(mt.duration);$('#statsMonthIncome').textContent=money(mt.income);
+  $('#annualEntrySub').textContent=`查看 ${state.annualYear} 年全年工作概览`;if($('#statsDimension'))$('#statsDimension').value=state.statsDimension;$('#statsDimensionRange').textContent=`当前范围：${statsPeriodLabel()}`;
+  const bounds=statsPeriodBounds(),root=$('#statsDimensionList');
+  if(state.statsDimension==='book'){
+    const books=state.data.books.filter(b=>state.data.records.some(r=>r.bookId===b.id&&dateInBounds(recordWorkDate(r),bounds))||state.data.settlements.some(x=>x.bookId===b.id&&dateInBounds(x.date,bounds)));root.innerHTML=books.length?books.map(b=>statBookCard(b,bounds)).join(''):empty('这个统计范围里还没有按书数据。');
+  }else{
+    const key=state.statsDimension==='client'?'client':'platform',groups=groupedPeriodStats(key);root.innerHTML=groups.length?groups.map(g=>groupStatCard(key,g)).join(''):empty(`这个统计范围里还没有${key==='client'?'甲方':'平台'}数据。`);
+  }
 }
-function renderSettingsSummary(){
-  const el=$('#settingsDataSummary'); if(!el)return;
-  el.innerHTML=`<div class="settings-summary-grid"><div><span>书籍</span><strong>${state.data.books.length}</strong></div><div><span>录音记录</span><strong>${state.data.records.length}</strong></div><div><span>结算记录</span><strong>${state.data.settlements.length}</strong></div></div>`;
+function renderStatsHistory(){
+  renderYearOptions();const pt=statsPeriodTotals();$('#statsPeriodSelect').value=state.statsPeriod;$('#statsPeriodLabel').textContent=statsPeriodLabel();$('#statsPeriodDuration').textContent=secToText(pt.duration);$('#statsPeriodReceivable').textContent=money(pt.receivable);$('#statsPeriodReceived').textContent=money(pt.received);$('#statsPeriodOutstanding').textContent=money(pt.outstanding);$('#statsPeriodRecords').textContent=`${pt.records} 条`;
+  $('#statsYearWrap').hidden=state.statsPeriod!=='yearPick';$('#statsCustomMonthWrap').hidden=state.statsPeriod!=='customMonth';$('#statsCustomRangeWrap').hidden=state.statsPeriod!=='customRange';$('#statsCustomMonth').value=state.statsCustomMonth;$('#statsRangeStart').value=state.statsRangeStart;$('#statsRangeEnd').value=state.statsRangeEnd;
+  const quick=$('#statsMonthQuick');const show=['year','yearPick'].includes(state.statsPeriod);quick.hidden=!show;if(show){const y=state.statsPeriod==='yearPick'?state.statsYear:Number(todayWorkDate().slice(0,4));quick.innerHTML=Array.from({length:12},(_,i)=>`<button type="button" data-quick-month="${y}-${String(i+1).padStart(2,'0')}">${i+1}月</button>`).join('');}
+  const bounds=statsPeriodBounds(),books=state.data.books.filter(b=>state.data.records.some(r=>r.bookId===b.id&&dateInBounds(recordWorkDate(r),bounds))||state.data.settlements.some(x=>x.bookId===b.id&&dateInBounds(x.date,bounds)));$('#historyBookList').innerHTML=books.length?books.map(b=>statBookCard(b,bounds)).join(''):empty('这个周期里还没有项目数据。');
 }
-function renderWorkSettings(){
-  if($('#workdayCutoff'))$('#workdayCutoff').value=state.workSettings.cutoff||'06:00';
-  if($('#dailyGoalMinutes'))$('#dailyGoalMinutes').value=state.workSettings.dailyGoalMinutes||'';
-  if($('#monthlyGoalHours'))$('#monthlyGoalHours').value=state.workSettings.monthlyGoalHours||'';
+function renderMetricDetail(){
+  const type=state.metricDetail,root=$('#metricDetailContent');if(!root||!type)return;const td=dayTotals(),mt=monthTotals(),dailyGoal=(Number(state.workSettings.dailyGoalMinutes)||0)*60,monthGoal=(Number(state.workSettings.monthlyGoalHours)||0)*3600;
+  const todayRs=state.data.records.filter(r=>recordWorkDate(r)===todayWorkDate()),monthBounds=boundsForMonth(),monthRs=currentMonthRecords();let title='',hero='',body='';
+  if(type==='todayGoal'||type==='todayDuration'||type==='todayIncome'){
+    title=type==='todayGoal'?'今日目标':type==='todayIncome'?'今日应收':'今日成品';const goal=type==='todayGoal'&&dailyGoal?`<div class="detail-progress"><div><span>目标</span><strong>${secToText(dailyGoal)}</strong></div><div class="goal-track"><i style="width:${clamp(td.duration/dailyGoal*100,0,100)}%"></i></div><small>${td.duration>=dailyGoal?'今天的目标已经完成':`还差 ${secToText(Math.max(0,dailyGoal-td.duration))}`}</small></div>`:'';hero=`<div class="metric-detail-hero"><span>${todayWorkDate()} 工作日</span><strong>${type==='todayIncome'?money(td.income):secToText(td.duration)}</strong><small>${todayRs.length} 条记录</small></div>${goal}`;body=`<section class="section-block"><div class="section-head"><div><h2>今天的记录</h2><p>凌晨 ${state.workSettings.cutoff||'06:00'} 前仍归前一天</p></div></div><div class="card-list">${todayRs.length?todayRs.sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||'')).map(recordCard).join(''):empty('今天还没有记录。')}</div></section>`;
+  }else{
+    title=type==='monthGoal'?'本月目标':type==='monthIncome'?'本月应收':'本月成品';const goal=type==='monthGoal'&&monthGoal?`<div class="detail-progress"><div><span>目标</span><strong>${secToText(monthGoal)}</strong></div><div class="goal-track"><i style="width:${clamp(mt.duration/monthGoal*100,0,100)}%"></i></div><small>${mt.duration>=monthGoal?'本月目标已经完成':`还差 ${secToText(Math.max(0,monthGoal-mt.duration))}`}</small></div>`:'';hero=`<div class="metric-detail-hero"><span>${currentYM()}</span><strong>${type==='monthIncome'?money(mt.income):secToText(mt.duration)}</strong><small>${monthRs.length} 条记录</small></div>${goal}`;body=`<section class="section-block"><div class="section-head"><div><h2>按书查看</h2><p>本月有工作记录的项目</p></div></div><div class="card-list">${monthRs.length?recordsByBookCards(monthRs,monthBounds):empty('本月还没有记录。')}</div></section>`;
+  }
+  $('#metricDetailTitle').textContent=title;root.innerHTML=hero+body+(type==='todayGoal'||type==='monthGoal'?`<button class="secondary-wide metric-settings-jump" type="button" data-open-settings>调整工作目标</button>`:'');
 }
-function renderExportOptions(){
-  const years=availableYears(),clients=uniqueSorted(state.data.books.map(b=>b.client)),books=state.data.books.slice().sort((a,b)=>a.title.localeCompare(b.title,'zh-CN'));
-  if($('#csvYear'))$('#csvYear').innerHTML=years.map(y=>`<option value="${y}">${y}</option>`).join('');
-  if($('#csvMonth')&&!$('#csvMonth').value)$('#csvMonth').value=currentYM();
-  if($('#csvClient'))$('#csvClient').innerHTML=clients.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
-  if($('#csvBook'))$('#csvBook').innerHTML=books.map(b=>`<option value="${b.id}">《${escapeHtml(b.title)}》</option>`).join('');
-  updateCsvScopeUI();
+function openMetricDetail(type,returnView=state.currentView){state.metricDetail=type;state.metricReturnView=returnView;switchView('metric-detail');renderMetricDetail();}
+function renderSettingsSummary(){const el=$('#settingsDataSummary');if(el)el.innerHTML=`<div class="settings-summary-grid"><div><span>书籍</span><strong>${state.data.books.length}</strong></div><div><span>录音记录</span><strong>${state.data.records.length}</strong></div><div><span>结算记录</span><strong>${state.data.settlements.length}</strong></div></div>`;}
+function renderWorkSettings(){if($('#workdayCutoff'))$('#workdayCutoff').value=state.workSettings.cutoff||'06:00';if($('#dailyGoalMinutes'))$('#dailyGoalMinutes').value=state.workSettings.dailyGoalMinutes||'';if($('#monthlyGoalHours'))$('#monthlyGoalHours').value=state.workSettings.monthlyGoalHours||'';}
+function renderExportOptions(){const years=availableYears(),clients=uniqueSorted(state.data.books.map(b=>b.client)),books=state.data.books.slice().sort((a,b)=>a.title.localeCompare(b.title,'zh-CN'));if($('#csvYear'))$('#csvYear').innerHTML=years.map(y=>`<option value="${y}">${y}</option>`).join('');if($('#csvMonth')&&!$('#csvMonth').value)$('#csvMonth').value=currentYM();if($('#csvClient'))$('#csvClient').innerHTML=clients.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');if($('#csvBook'))$('#csvBook').innerHTML=books.map(b=>`<option value="${b.id}">《${escapeHtml(b.title)}》</option>`).join('');updateCsvScopeUI();}
+function renderChangelog(){
+  const root=$('#changelogList');if(!root)return;const versions=[
+    {v:'0.8 Beta',tag:'信息架构重构',items:['首页从展示页升级为可点击仪表盘；目标、本月成品与应收均可进入明细。','底部导航收敛为首页、书库、拍照、结算、统计；设置移到右上角。','书库加入成品时长、累计应收、小时单价、建档时间排序与升降序。','统计拆成往期统计、年度报告二级页面；分类统计改为按书籍 / 甲方 / 平台切换。','结算支持按书籍 / 按甲方两种视角，以及平台、甲方、结算状态筛选和排序。','修复旧版凌晨数据迁移：符合条件的旧记录按 06:00 工作日规则重新归属。','设置新增从早期版本到当前版本的更新日志。']},
+    {v:'0.7 Beta',tag:'工作流完善',items:['加入重复记录检测与冲突处理。','录音记录可编辑、删除、恢复，并可撤销上一批导入。','新增结算中心、长期时间统计、年度报告、工作目标与 06:00 自定义工作日。','JSON 备份继续保留，并加入可供 Excel / Numbers 打开的 CSV 流水导出。']},
+    {v:'0.6 Beta',tag:'云端 OCR 定档',items:['拍照识别正式切到火山引擎 OCRNormal + Cloudflare Worker。','按文件名行与坐标配对书名、集数和时长，继续过滤返音 / 反音。','保留固定文件简称到正式书名的映射，并继续兼容旧数据。']},
+    {v:'0.5 Beta',tag:'云端视觉试验',items:['彻底停用浏览器内 Tesseract.js，开始把识别链路迁到云端视觉服务。','GitHub Pages 继续只保存前端，识别服务改由 Cloudflare Worker 中转。']},
+    {v:'0.4 Beta',tag:'横线分格 OCR',items:['尝试先检测 Windows 文件列表横向分隔线，再逐格 OCR。','Logo 改为内嵌 SVG，PWA 图标移到仓库根目录以减少 iPhone 缓存问题。']},
+    {v:'0.3 Beta',tag:'多阶段 OCR',items:['整图原图 / 增强图多阶段识别，按集数和位置合并结果。','对文件名与时长区域做二次裁切识别，并新增版本化 App 图标。']},
+    {v:'0.2.2',tag:'容错与历史统计',items:['返音 / 反音在 OCR 阶段直接过滤。','简称增加轻微错字匹配；时长与文件行加强版面配对。','新增平台 / 甲方筛选、往期统计、按平台 / 甲方统计和 JSON 备份。']},
+    {v:'0.2.1',tag:'手动兜底',items:['新增手动记录入口。','完善时长输入与校验，支持纯数字和多种时间格式。','OCR 开始利用坐标把文件名和右侧时长按水平行配对。']},
+    {v:'0.2',tag:'拍照识别上线',items:['iPhone 可拍照或从相册选择电脑屏幕，一张图识别多条录音记录。','识别结果先确认再保存，接入书籍简称映射、今日 / 本月统计与结算。']},
+    {v:'0.1',tag:'移动端原型',items:['从桌面方案转向手机优先 PWA。','搭起有声书项目、书籍资料、成品时长、进度、应收、结算和本地数据保存的基础框架。']}
+  ];root.innerHTML=versions.map((x,i)=>`<details class="changelog-item" ${i===0?'open':''}><summary><div><strong>${x.v}</strong><span>${x.tag}</span></div><i>⌄</i></summary><ul>${x.items.map(y=>`<li>${escapeHtml(y)}</li>`).join('')}</ul></details>`).join('');
 }
 function bookCard(book){
   const t=bookTotals(book.id);
@@ -406,10 +504,12 @@ function groupStatCard(type,g){
 function empty(text){return `<div class="empty-card">${escapeHtml(text)}</div>`;}
 
 function switchView(view){
+  if(view!==state.currentView)state.previousView=state.currentView;
   state.currentView=view;
   document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id===`view-${view}`));
   document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active',el.dataset.view===view));
   window.scrollTo({top:0,behavior:'instant'});
+  if(view==='stats-history')renderStatsHistory();if(view==='stats-annual')renderAnnualReport();if(view==='metric-detail')renderMetricDetail();if(view==='settings'){renderWorkSettings();renderCloudOcrSettings();renderChangelog();}
 }
 function openModal(id){ const el=$(`#${id}`); el.classList.add('open'); el.setAttribute('aria-hidden','false'); document.body.style.overflow='hidden'; }
 function closeModal(id){ const el=$(`#${id}`); el.classList.remove('open'); el.setAttribute('aria-hidden','true'); document.body.style.overflow=''; }
@@ -928,18 +1028,21 @@ function saveWorkSettingsFromUI(){
 }
 function downloadBlob(blob,filename){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function exportBackup(){
-  const payload={app:'VoiceLedger',version:'0.7-beta',exportedAt:new Date().toISOString(),workSettings:state.workSettings,data:state.data};
+  const payload={app:'VoiceLedger',version:'0.8-beta',exportedAt:new Date().toISOString(),workSettings:state.workSettings,data:state.data};
   downloadBlob(new Blob([JSON.stringify(payload,null,2)],{type:'application/json;charset=utf-8'}),`VoiceLedger-backup-${todayISO()}.json`); toast('JSON 备份已导出');
 }
 async function importBackupFile(file){
   if(!file)return;
   try{
-    const raw=JSON.parse(await file.text()); const data=raw?.data||raw;
-    if(!data || !Array.isArray(data.books)||!Array.isArray(data.records)||!Array.isArray(data.settlements))throw new Error('bad format');
-    if(!confirm(`将用备份覆盖当前数据。\n\n备份里有 ${data.books.length} 本书、${data.records.length} 条录音记录、${data.settlements.length} 条结算记录。\n\n继续吗？`))return;
-    state.data=normalizeDataShape(data);
+    const raw=JSON.parse(await file.text()),data=raw?.data||raw;
+    if(!data||!Array.isArray(data.books)||!Array.isArray(data.records)||!Array.isArray(data.settlements))throw new Error('bad format');
+    if(!confirm(`将用备份覆盖当前数据。
+
+备份里有 ${data.books.length} 本书、${data.records.length} 条录音记录、${data.settlements.length} 条结算记录。
+
+继续吗？`))return;
     if(raw?.workSettings){state.workSettings={...state.workSettings,...raw.workSettings};saveWorkSettings();}
-    localStorage.setItem(STORAGE_KEY,JSON.stringify(state.data)); refreshDraftBookMatches(); renderOcrDrafts(); renderAll(); toast('备份已导入');
+    state.data=normalizeDataShape(data);localStorage.setItem(STORAGE_KEY,JSON.stringify(state.data));refreshDraftBookMatches();renderOcrDrafts();renderAll();toast('备份已导入');
   }catch(err){console.error(err);toast('这个文件不是有效的声账备份');}
 }
 function updateCsvScopeUI(){
@@ -962,46 +1065,50 @@ function exportCsv(){
   const text='\uFEFF'+[headers,...rows].map(row=>row.map(csvEscape).join(',')).join('\r\n');
   const scope=$('#csvScope')?.value||'all';downloadBlob(new Blob([text],{type:'text/csv;charset=utf-8'}),`VoiceLedger-${scope}-${todayISO()}.csv`);toast(`已导出 ${rs.length} 条 CSV 流水`);
 }
-// Events
+// Events — 0.8 信息架构
 $('.tabbar').addEventListener('click',e=>{const btn=e.target.closest('.tab');if(btn)switchView(btn.dataset.view);});
+$('#brandHomeBtn').addEventListener('click',()=>switchView('home'));
+$('#topSettingsBtn').addEventListener('click',()=>{state.previousView=state.currentView;switchView('settings');});
+$('#settingsBackBtn').addEventListener('click',()=>switchView(['settings','metric-detail'].includes(state.previousView)?'home':state.previousView||'home'));
+$('#metricBackBtn').addEventListener('click',()=>switchView(state.metricReturnView||'home'));
 $('#homeCameraBtn').addEventListener('click',()=>switchView('camera'));
-$('#homeNewBookBtn').addEventListener('click',()=>openBookForm()); $('#newBookBtn').addEventListener('click',()=>openBookForm());
-$('#takePhotoBtn').addEventListener('click',()=>$('#cameraInput').click()); $('#choosePhotoBtn').addEventListener('click',()=>$('#photoInput').click()); $('#manualRecordBtn').addEventListener('click',addManualDraft);
-$('#cameraInput').addEventListener('change',e=>{processImages([...e.target.files]);e.target.value='';}); $('#photoInput').addEventListener('change',e=>{processImages([...e.target.files]);e.target.value='';});
-$('#clearOcrBtn').addEventListener('click',()=>{state.ocrDrafts=[];$('#ocrPreview').hidden=true;}); $('#saveOcrBtn').addEventListener('click',saveOcrDrafts);
-$('#ocrRows').addEventListener('input',e=>{if(e.target.dataset.field)syncDraftFromInput(e.target,false)}); $('#ocrRows').addEventListener('change',e=>{if(e.target.dataset.field)syncDraftFromInput(e.target,true)});
+$('#homeNewBookBtn').addEventListener('click',()=>openBookForm());$('#homeAllBooksBtn').addEventListener('click',()=>switchView('books'));$('#newBookBtn').addEventListener('click',()=>openBookForm());
+$('#takePhotoBtn').addEventListener('click',()=>$('#cameraInput').click());$('#choosePhotoBtn').addEventListener('click',()=>$('#photoInput').click());$('#manualRecordBtn').addEventListener('click',addManualDraft);
+$('#cameraInput').addEventListener('change',e=>{processImages([...e.target.files]);e.target.value='';});$('#photoInput').addEventListener('change',e=>{processImages([...e.target.files]);e.target.value='';});
+$('#clearOcrBtn').addEventListener('click',()=>{state.ocrDrafts=[];$('#ocrPreview').hidden=true;});$('#saveOcrBtn').addEventListener('click',saveOcrDrafts);
+$('#ocrRows').addEventListener('input',e=>{if(e.target.dataset.field)syncDraftFromInput(e.target,false)});$('#ocrRows').addEventListener('change',e=>{if(e.target.dataset.field)syncDraftFromInput(e.target,true)});
 $('#ocrRows').addEventListener('focusout',e=>{if(e.target.dataset.field==='durationText'){const formatted=formatDurationInput(e.target.value);e.target.value=formatted;syncDraftFromInput(e.target,true);}});
 $('#ocrRows').addEventListener('click',e=>{const id=e.target.dataset.removeDraft;if(id){state.ocrDrafts=state.ocrDrafts.filter(d=>d.id!==id);renderOcrDrafts();if(!state.ocrDrafts.length)$('#ocrPreview').hidden=true;return;}const action=e.target.dataset.conflictAction;if(action)setDraftConflictAction(e.target.dataset.id,action);});
 $('#bookFilters').addEventListener('click',e=>{const b=e.target.closest('[data-filter]');if(!b)return;state.bookFilter=b.dataset.filter;document.querySelectorAll('.filter-chip').forEach(x=>x.classList.toggle('active',x===b));renderBooks();});
-$('#bookPlatformFilter').addEventListener('change',e=>{state.platformFilter=e.target.value;renderBooks();});
-$('#bookClientFilter').addEventListener('change',e=>{state.clientFilter=e.target.value;renderBooks();});
-$('#statsPeriodSelect').addEventListener('change',e=>{state.statsPeriod=e.target.value;renderStats();});
-$('#statsYearSelect').addEventListener('change',e=>{state.statsYear=Number(e.target.value);state.statsPeriod='yearPick';renderStats();});
-$('#statsCustomMonth').addEventListener('change',e=>{state.statsCustomMonth=e.target.value||currentYM();state.statsPeriod='customMonth';$('#statsPeriodSelect').value='customMonth';renderStats();});
-$('#statsRangeStart').addEventListener('change',e=>{state.statsRangeStart=e.target.value||todayWorkDate();state.statsPeriod='customRange';$('#statsPeriodSelect').value='customRange';renderStats();});
-$('#statsRangeEnd').addEventListener('change',e=>{state.statsRangeEnd=e.target.value||todayWorkDate();state.statsPeriod='customRange';$('#statsPeriodSelect').value='customRange';renderStats();});
-$('#saveCloudOcrBtn').addEventListener('click',saveCloudOcrEndpoint); $('#testCloudOcrBtn').addEventListener('click',testCloudOcrEndpoint);
-$('#saveWorkSettingsBtn').addEventListener('click',saveWorkSettingsFromUI);
-$('#undoLastImportBtn').addEventListener('click',undoLastImport);
-$('#exportDataBtn').addEventListener('click',exportBackup); $('#importDataBtn').addEventListener('click',()=>$('#importDataInput').click());
-$('#importDataInput').addEventListener('change',e=>{importBackupFile(e.target.files?.[0]);e.target.value='';});
-$('#csvScope').addEventListener('change',updateCsvScopeUI);$('#exportCsvBtn').addEventListener('click',exportCsv);
+$('#bookPlatformFilter').addEventListener('change',e=>{state.platformFilter=e.target.value;renderBooks();});$('#bookClientFilter').addEventListener('change',e=>{state.clientFilter=e.target.value;renderBooks();});
+$('#bookSort').addEventListener('change',e=>{state.bookSort=e.target.value;if(state.bookSort!=='default'&&!['asc','desc'].includes(state.bookSortDir))state.bookSortDir='desc';renderLibraryFilters();renderBooks();});
+$('#bookSortDirection').addEventListener('click',()=>{if(state.bookSort==='default')return;state.bookSortDir=state.bookSortDir==='desc'?'asc':'desc';renderLibraryFilters();renderBooks();});
+$('#settlementViewToggle').addEventListener('click',e=>{const b=e.target.closest('[data-settlement-view]');if(!b)return;state.settlementView=b.dataset.settlementView;renderSettlementFilters();renderSettlementCenter();});
+for(const [id,key] of [['settlementPlatformFilter','settlementPlatformFilter'],['settlementClientFilter','settlementClientFilter'],['settlementStatusFilter','settlementStatusFilter'],['settlementSort','settlementSort']])$(`#${id}`).addEventListener('change',e=>{state[key]=e.target.value;renderSettlementCenter();});
+$('#settlementSortDirection').addEventListener('click',()=>{state.settlementSortDir=state.settlementSortDir==='desc'?'asc':'desc';renderSettlementFilters();renderSettlementCenter();});
+$('#openHistoryStatsBtn').addEventListener('click',()=>switchView('stats-history'));$('#openAnnualReportBtn').addEventListener('click',()=>switchView('stats-annual'));
+$('#statsDimension').addEventListener('change',e=>{state.statsDimension=e.target.value;renderStats();});
+$('#statsPeriodSelect').addEventListener('change',e=>{state.statsPeriod=e.target.value;renderStatsHistory();renderStats();});
+$('#statsYearSelect').addEventListener('change',e=>{state.statsYear=Number(e.target.value);state.statsPeriod='yearPick';renderStatsHistory();renderStats();});
+$('#statsCustomMonth').addEventListener('change',e=>{state.statsCustomMonth=e.target.value||currentYM();state.statsPeriod='customMonth';renderStatsHistory();renderStats();});
+$('#statsRangeStart').addEventListener('change',e=>{state.statsRangeStart=e.target.value||todayWorkDate();state.statsPeriod='customRange';renderStatsHistory();renderStats();});
+$('#statsRangeEnd').addEventListener('change',e=>{state.statsRangeEnd=e.target.value||todayWorkDate();state.statsPeriod='customRange';renderStatsHistory();renderStats();});
+$('#annualYearSelect').addEventListener('change',e=>{state.annualYear=Number(e.target.value);renderAnnualReport();renderStats();});
+$('#saveCloudOcrBtn').addEventListener('click',saveCloudOcrEndpoint);$('#testCloudOcrBtn').addEventListener('click',testCloudOcrEndpoint);$('#saveWorkSettingsBtn').addEventListener('click',saveWorkSettingsFromUI);$('#undoLastImportBtn').addEventListener('click',undoLastImport);
+$('#exportDataBtn').addEventListener('click',exportBackup);$('#importDataBtn').addEventListener('click',()=>$('#importDataInput').click());$('#importDataInput').addEventListener('change',e=>{importBackupFile(e.target.files?.[0]);e.target.value='';});$('#csvScope').addEventListener('change',updateCsvScopeUI);$('#exportCsvBtn').addEventListener('click',exportCsv);
 document.addEventListener('click',e=>{
-  const editRecord=e.target.closest('[data-edit-record]'); if(editRecord){openRecordEditor(editRecord.dataset.editRecord);return;}
-  const restore=e.target.closest('[data-restore-record]'); if(restore){restoreTrashRecord(restore.dataset.restoreRecord);return;}
-  const open=e.target.closest('[data-open-book]'); if(open){openBookDetail(open.dataset.openBook);return;}
-  const edit=e.target.closest('[data-edit-book]'); if(edit){closeModal('bookDetailModal');openBookForm(bookById(edit.dataset.editBook));return;}
-  const settle=e.target.closest('[data-add-settlement]'); if(settle){openSettlement(settle.dataset.addSettlement);return;}
-  const settleClient=e.target.closest('[data-settle-client]'); if(settleClient){state.bookFilter='all';state.clientFilter=settleClient.dataset.settleClient;state.platformFilter='all';renderLibraryFilters();renderBooks();switchView('books');return;}
-  const qm=e.target.closest('[data-quick-month]'); if(qm){state.statsCustomMonth=qm.dataset.quickMonth;state.statsPeriod='customMonth';renderStats();return;}
-  const group=e.target.closest('[data-group-type]'); if(group){
-    state.bookFilter='all'; document.querySelectorAll('.filter-chip').forEach(x=>x.classList.toggle('active',x.dataset.filter==='all'));
-    if(group.dataset.groupType==='platform'){state.platformFilter=group.dataset.groupName;state.clientFilter='all';}
-    else{state.clientFilter=group.dataset.groupName;state.platformFilter='all';}
-    renderLibraryFilters(); renderBooks(); switchView('books'); return;
-  }
-  const close=e.target.closest('[data-close]'); if(close)closeModal(close.dataset.close);
+  const back=e.target.closest('[data-back-view]');if(back){switchView(back.dataset.backView);return;}
+  const metric=e.target.closest('[data-metric-detail]');if(metric){openMetricDetail(metric.dataset.metricDetail,state.currentView);return;}
+  if(e.target.closest('[data-open-settings]')){state.previousView=state.currentView;switchView('settings');return;}
+  const editRecord=e.target.closest('[data-edit-record]');if(editRecord){openRecordEditor(editRecord.dataset.editRecord);return;}
+  const restore=e.target.closest('[data-restore-record]');if(restore){restoreTrashRecord(restore.dataset.restoreRecord);return;}
+  const open=e.target.closest('[data-open-book]');if(open){openBookDetail(open.dataset.openBook);return;}
+  const edit=e.target.closest('[data-edit-book]');if(edit){closeModal('bookDetailModal');openBookForm(bookById(edit.dataset.editBook));return;}
+  const settle=e.target.closest('[data-add-settlement]');if(settle){openSettlement(settle.dataset.addSettlement);return;}
+  const settleClient=e.target.closest('[data-settle-client]');if(settleClient){state.settlementView='book';state.settlementClientFilter=settleClient.dataset.settleClient;renderSettlementFilters();renderSettlementCenter();return;}
+  const qm=e.target.closest('[data-quick-month]');if(qm){state.statsCustomMonth=qm.dataset.quickMonth;state.statsPeriod='customMonth';renderStatsHistory();renderStats();return;}
+  const group=e.target.closest('[data-group-type]');if(group){state.bookFilter='all';document.querySelectorAll('.filter-chip').forEach(x=>x.classList.toggle('active',x.dataset.filter==='all'));if(group.dataset.groupType==='platform'){state.platformFilter=group.dataset.groupName;state.clientFilter='all';}else{state.clientFilter=group.dataset.groupName;state.platformFilter='all';}renderLibraryFilters();renderBooks();switchView('books');return;}
+  const close=e.target.closest('[data-close]');if(close)closeModal(close.dataset.close);
 });
-
 if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));}
 renderAll();

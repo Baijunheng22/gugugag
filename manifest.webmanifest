@@ -1,5 +1,5 @@
 {
-  "name": "声账 VoiceLedger",
+  "name": "声账 VoiceLedger 0.8 Beta",
   "short_name": "声账",
   "description": "手机拍照识别有声书录音记录，统计时长、进度、应收与结算。",
   "start_url": "./",
@@ -7,7 +7,17 @@
   "background_color": "#f4f6f8",
   "theme_color": "#f4f6f8",
   "icons": [
-    {"src":"./icon-192.png?v=0.7","sizes":"192x192","type":"image/png","purpose":"any maskable"},
-    {"src":"./icon-512.png?v=0.7","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+    {
+      "src": "./icon-192.png?v=0.8",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-512.png?v=0.8",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
   ]
 }

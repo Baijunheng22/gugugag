@@ -1,3 +1,7 @@
+# VoiceLedger 0.8 OCR 说明
+
+0.8 不需要重建或重新部署已经可用的 Cloudflare Worker / 火山 OCR。以下内容只在后端尚未配置时参考。
+
 > **0.7 提示：** 如果你已经在 0.6 成功搭好 Cloudflare Worker 和火山 OCR，0.7 不需要重新配置这一部分。直接保留原 Worker 地址即可。
 
 # VoiceLedger 0.7 Beta：火山引擎免费 OCR 配置

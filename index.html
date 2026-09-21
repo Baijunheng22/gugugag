@@ -8,400 +8,135 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="声账" />
   <link rel="manifest" href="./manifest.webmanifest" />
-  <link rel="apple-touch-icon" href="./apple-touch-icon.png?v=0.7" />
-  <link rel="icon" type="image/png" href="./favicon.png?v=0.7" />
-  <link rel="stylesheet" href="./styles.css?v=0.7" />
-  <title>声账 VoiceLedger 0.7 Beta</title>
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png?v=0.8" />
+  <link rel="icon" type="image/png" href="./favicon.png?v=0.8" />
+  <link rel="stylesheet" href="./styles.css?v=0.8" />
+  <title>声账 VoiceLedger 0.8 Beta</title>
 </head>
 <body>
   <div class="app-shell" id="app">
     <header class="topbar">
-      <div class="brand-lockup"><svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="17" fill="#111827"/><path d="M15 33h7l4-12 7 25 5-18 4 10h7" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg><div><div class="eyebrow">VoiceLedger · 0.7 Beta</div><h1>声账</h1></div></div>
-      <div class="topbar-chip">有声书</div>
+      <button class="brand-lockup brand-button" id="brandHomeBtn" type="button" aria-label="回到首页">
+        <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="17" fill="#111827"/><path d="M15 33h7l4-12 7 25 5-18 4 10h7" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div><div class="eyebrow">VoiceLedger · 0.8 Beta</div><h1>声账</h1></div>
+      </button>
+      <button class="top-settings-btn" id="topSettingsBtn" type="button" aria-label="设置"><span>⚙</span></button>
     </header>
 
     <main class="main-content">
       <section class="view active" id="view-home" aria-labelledby="tab-home">
         <div class="hero-card">
-          <div class="hero-copy">
-            <div class="hero-kicker">今天</div>
-            <div class="hero-value" id="todayDuration">0 分钟</div>
-            <div class="hero-sub" id="todayIncome">今日应收 ¥0.00</div>
-          </div>
-          <button class="camera-cta" id="homeCameraBtn" type="button" aria-label="拍照识别">
-            <span class="camera-icon">⌁</span>
-            <span>拍照识别</span>
-          </button>
+          <div class="hero-copy"><div class="hero-kicker">今天</div><div class="hero-value" id="todayDuration">0 分钟</div><div class="hero-sub" id="todayIncome">今日应收 ¥0.00</div></div>
+          <button class="camera-cta" id="homeCameraBtn" type="button" aria-label="拍照识别"><span class="camera-icon">⌁</span><span>拍照识别</span></button>
         </div>
 
-        <section class="goal-strip" id="goalStrip">
-          <div class="goal-row">
-            <div><span>今日目标</span><strong id="todayGoalText">未设置</strong></div>
-            <div class="goal-track"><i id="todayGoalBar"></i></div>
-          </div>
-          <div class="goal-row">
-            <div><span>本月目标</span><strong id="monthGoalText">未设置</strong></div>
-            <div class="goal-track"><i id="monthGoalBar"></i></div>
-          </div>
+        <section class="goal-strip">
+          <button class="goal-row interactive-row" id="todayGoalCard" type="button" data-metric-detail="todayGoal">
+            <div><span>今日目标</span><strong id="todayGoalText">未设置</strong><i class="row-chev">›</i></div><div class="goal-track"><i id="todayGoalBar"></i></div>
+          </button>
+          <button class="goal-row interactive-row" id="monthGoalCard" type="button" data-metric-detail="monthGoal">
+            <div><span>本月目标</span><strong id="monthGoalText">未设置</strong><i class="row-chev">›</i></div><div class="goal-track"><i id="monthGoalBar"></i></div>
+          </button>
         </section>
 
         <div class="summary-grid">
-          <article class="metric-card">
-            <span>本月成品</span>
-            <strong id="monthDuration">0 分钟</strong>
-          </article>
-          <article class="metric-card">
-            <span>本月应收</span>
-            <strong id="monthIncome">¥0.00</strong>
-          </article>
+          <button class="metric-card metric-button" type="button" data-metric-detail="monthDuration"><span>本月成品</span><strong id="monthDuration">0 分钟</strong><i>查看明细 ›</i></button>
+          <button class="metric-card metric-button" type="button" data-metric-detail="monthIncome"><span>本月应收</span><strong id="monthIncome">¥0.00</strong><i>查看明细 ›</i></button>
         </div>
 
         <section class="section-block">
-          <div class="section-head">
-            <div>
-              <h2>正在做的书</h2>
-              <p>简称会自动归到正式书名</p>
-            </div>
-            <button class="text-btn" id="homeNewBookBtn" type="button">新建</button>
-          </div>
+          <div class="section-head"><div><h2>正在做的书</h2><p>最近活跃的项目，完整项目都在书库</p></div><div class="section-actions"><button class="text-btn muted-action" id="homeAllBooksBtn" type="button">书库</button><button class="text-btn" id="homeNewBookBtn" type="button">新建</button></div></div>
           <div class="card-list" id="activeBooks"></div>
         </section>
-
         <section class="section-block">
-          <div class="section-head">
-            <div>
-              <h2>今天的记录</h2>
-              <p>识别确认后才会进入统计</p>
-            </div>
-            <button class="text-btn" id="undoLastImportBtn" type="button" hidden>撤销上次导入</button>
-          </div>
+          <div class="section-head"><div><h2>今天的记录</h2><p>按 06:00 工作日规则统计</p></div><button class="text-btn" id="undoLastImportBtn" type="button" hidden>撤销上次导入</button></div>
           <div class="card-list" id="todayRecords"></div>
         </section>
       </section>
 
       <section class="view" id="view-books" aria-labelledby="tab-books">
-        <div class="page-head">
-          <div>
-            <div class="eyebrow">项目归档</div>
-            <h2>书库</h2>
-          </div>
-          <button class="mini-primary" id="newBookBtn" type="button">＋ 新建</button>
-        </div>
-        <div class="filter-row" id="bookFilters">
-          <button class="filter-chip active" data-filter="all" type="button">全部</button>
-          <button class="filter-chip" data-filter="ongoing" type="button">连载中</button>
-          <button class="filter-chip" data-filter="paused" type="button">暂停</button>
-          <button class="filter-chip" data-filter="finished" type="button">已完结</button>
-        </div>
-        <div class="library-filter-grid">
-          <label>平台<select id="bookPlatformFilter"><option value="all">全部平台</option></select></label>
-          <label>甲方 / 工作室<select id="bookClientFilter"><option value="all">全部甲方</option></select></label>
-        </div>
+        <div class="page-head"><div><div class="eyebrow">项目归档</div><h2>书库</h2></div><button class="mini-primary" id="newBookBtn" type="button">＋ 新建</button></div>
+        <div class="filter-row" id="bookFilters"><button class="filter-chip active" data-filter="all" type="button">全部</button><button class="filter-chip" data-filter="ongoing" type="button">连载中</button><button class="filter-chip" data-filter="paused" type="button">暂停</button><button class="filter-chip" data-filter="finished" type="button">已完结</button></div>
+        <div class="library-filter-grid"><label>平台<select id="bookPlatformFilter"><option value="all">全部平台</option></select></label><label>甲方 / 工作室<select id="bookClientFilter"><option value="all">全部甲方</option></select></label></div>
+        <div class="sort-toolbar"><label>排序<select id="bookSort"><option value="default">默认顺序</option><option value="duration">成品时长</option><option value="receivable">累计应收</option><option value="rate">小时单价</option><option value="created">建档时间</option></select></label><button class="sort-direction" id="bookSortDirection" type="button" aria-label="切换排序方向">高 → 低</button></div>
+        <div class="result-count" id="bookResultCount"></div>
         <div class="card-list" id="bookList"></div>
       </section>
 
       <section class="view" id="view-camera" aria-labelledby="tab-camera">
-        <div class="page-head">
-          <div>
-            <div class="eyebrow">核心入口</div>
-            <h2>拍照识别</h2>
-          </div>
-        </div>
-
-        <div class="scan-card">
-          <div class="scan-visual">
-            <div class="scan-lines"></div>
-            <span>识别书名简称 · 集数 · 成品时长</span>
-          </div>
-          <button class="primary-wide" id="takePhotoBtn" type="button">打开相机</button>
-          <button class="secondary-wide" id="choosePhotoBtn" type="button">从相册选择</button>
-          <button class="manual-wide" id="manualRecordBtn" type="button">手动新增记录</button>
-          <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
-          <input id="photoInput" type="file" accept="image/*" multiple hidden />
-          <p class="helper">照片会发送到你配置的云端视觉识别服务。一次照片可识别多条记录，结果仍会先让你确认和修改。</p>
-        </div>
-
-        <div class="ocr-progress" id="ocrProgress" hidden>
-          <div class="ocr-progress-top">
-            <span id="ocrProgressText">正在识别…</span>
-            <span id="ocrProgressPct">0%</span>
-          </div>
-          <div class="progress-track"><div id="ocrProgressBar"></div></div>
-        </div>
-
-        <div id="ocrPreview" class="section-block" hidden>
-          <div class="section-head">
-            <div>
-              <h2>识别结果</h2>
-              <p>确认后再写入声账</p>
-            </div>
-            <button class="text-btn danger" id="clearOcrBtn" type="button">清空</button>
-          </div>
-          <div id="ocrRows" class="ocr-rows"></div>
-          <button class="primary-wide sticky-confirm" id="saveOcrBtn" type="button">确认保存</button>
-        </div>
+        <div class="page-head"><div><div class="eyebrow">核心入口</div><h2>拍照识别</h2></div></div>
+        <div class="scan-card"><div class="scan-visual"><div class="scan-lines"></div><span>识别书名简称 · 集数 · 成品时长</span></div><button class="primary-wide" id="takePhotoBtn" type="button">打开相机</button><button class="secondary-wide" id="choosePhotoBtn" type="button">从相册选择</button><button class="manual-wide" id="manualRecordBtn" type="button">手动新增记录</button><input id="cameraInput" type="file" accept="image/*" capture="environment" hidden /><input id="photoInput" type="file" accept="image/*" multiple hidden /><p class="helper">照片会发送到已配置的云端 OCR。识别结果先确认，再写入声账；重复内容会自动检查。</p></div>
+        <div class="ocr-progress" id="ocrProgress" hidden><div class="ocr-progress-top"><span id="ocrProgressText">正在识别…</span><span id="ocrProgressPct">0%</span></div><div class="progress-track"><div id="ocrProgressBar"></div></div></div>
+        <div id="ocrPreview" class="section-block" hidden><div class="section-head"><div><h2>识别结果</h2><p>确认后再写入声账</p></div><button class="text-btn danger" id="clearOcrBtn" type="button">清空</button></div><div id="ocrRows" class="ocr-rows"></div><button class="primary-wide sticky-confirm" id="saveOcrBtn" type="button">确认保存</button></div>
       </section>
 
       <section class="view" id="view-settlement" aria-labelledby="tab-settlement">
-        <div class="page-head">
-          <div><div class="eyebrow">应收管理</div><h2>结算中心</h2></div>
-        </div>
-        <div class="settlement-summary-grid">
-          <article><span>累计应收</span><strong id="settleTotalReceivable">¥0.00</strong></article>
-          <article><span>累计已收</span><strong id="settleTotalReceived">¥0.00</strong></article>
-          <article class="wide"><span>当前未收</span><strong id="settleTotalUnreceived">¥0.00</strong></article>
-        </div>
-        <section class="section-block">
-          <div class="section-head"><div><h2>按甲方</h2><p>先看谁还欠你多少钱</p></div></div>
-          <div class="card-list" id="settlementClientList"></div>
+        <div class="page-head"><div><div class="eyebrow">应收管理</div><h2>结算</h2></div></div>
+        <div class="settlement-summary-grid"><article><span>累计应收</span><strong id="settleTotalReceivable">¥0.00</strong></article><article><span>累计已收</span><strong id="settleTotalReceived">¥0.00</strong></article><article class="wide"><span>当前未收</span><strong id="settleTotalUnreceived">¥0.00</strong></article></div>
+        <div class="segmented-control" id="settlementViewToggle"><button class="active" data-settlement-view="book" type="button">按书籍</button><button data-settlement-view="client" type="button">按甲方</button></div>
+        <section class="control-card compact-controls">
+          <div class="control-grid"><label>平台<select id="settlementPlatformFilter"><option value="all">全部平台</option></select></label><label>甲方<select id="settlementClientFilter"><option value="all">全部甲方</option></select></label><label id="settlementStatusWrap">状态<select id="settlementStatusFilter"><option value="outstanding">未结清</option><option value="all">全部状态</option><option value="unpaid">未结算</option><option value="partial">部分结算</option><option value="paid">已结清</option></select></label><label>排序<select id="settlementSort"><option value="unreceived">未收金额</option><option value="receivable">累计应收</option><option value="recent">最近记录</option><option value="rate">小时单价</option></select></label></div>
+          <button class="sort-direction full-sort" id="settlementSortDirection" type="button">高 → 低</button>
         </section>
-        <section class="section-block">
-          <div class="section-head"><div><h2>未结清书籍</h2><p>可直接进入项目记结算</p></div></div>
-          <div class="card-list" id="settlementBookList"></div>
-        </section>
+        <div class="section-head settlement-list-head"><div><h2 id="settlementListTitle">未结清书籍</h2><p id="settlementListSub">直接看哪本书还没结</p></div></div>
+        <div class="card-list" id="settlementList"></div>
       </section>
 
       <section class="view" id="view-stats" aria-labelledby="tab-stats">
-        <div class="page-head">
-          <div>
-            <div class="eyebrow">工作量</div>
-            <h2>统计</h2>
-          </div>
+        <div class="page-head"><div><div class="eyebrow">工作量</div><h2>统计</h2></div></div>
+        <div class="stats-grid dashboard-stats">
+          <button class="stat-big stat-button" type="button" data-metric-detail="todayDuration"><span>今日成品</span><strong id="statsTodayDuration">0 分钟</strong><i>›</i></button>
+          <button class="stat-big stat-button" type="button" data-metric-detail="todayIncome"><span>今日应收</span><strong id="statsTodayIncome">¥0.00</strong><i>›</i></button>
+          <button class="stat-big stat-button" type="button" data-metric-detail="monthDuration"><span>本月成品</span><strong id="statsMonthDuration">0 分钟</strong><i>›</i></button>
+          <button class="stat-big stat-button" type="button" data-metric-detail="monthIncome"><span>本月应收</span><strong id="statsMonthIncome">¥0.00</strong><i>›</i></button>
         </div>
-
-        <div class="stats-grid">
-          <article class="stat-big"><span>今日成品</span><strong id="statsTodayDuration">0 分钟</strong></article>
-          <article class="stat-big"><span>今日应收</span><strong id="statsTodayIncome">¥0.00</strong></article>
-          <article class="stat-big"><span>本月成品</span><strong id="statsMonthDuration">0 分钟</strong></article>
-          <article class="stat-big"><span>本月应收</span><strong id="statsMonthIncome">¥0.00</strong></article>
+        <div class="nav-card-stack">
+          <button class="nav-card" id="openHistoryStatsBtn" type="button"><div><span>往期统计</span><strong>按年份、月份或自定义日期查看</strong></div><i>›</i></button>
+          <button class="nav-card" id="openAnnualReportBtn" type="button"><div><span>年度报告</span><strong id="annualEntrySub">查看全年工作概览</strong></div><i>›</i></button>
         </div>
-
-        <section class="section-block history-stats-block">
-          <div class="section-head stats-period-head">
-            <div>
-              <h2>往期统计</h2>
-              <p>以前的记录不会消失，可以按月、按年或看全部</p>
-            </div>
-            <select id="statsPeriodSelect" class="compact-select">
-              <option value="month">本月</option>
-              <option value="year">今年</option>
-              <option value="yearPick">指定年份</option>
-              <option value="customMonth">指定月份</option>
-              <option value="customRange">自定义日期</option>
-              <option value="all">全部历史</option>
-            </select>
-          </div>
-          <div class="period-picker-row">
-            <label id="statsYearWrap" class="period-picker" hidden>年份<select id="statsYearSelect"></select></label>
-            <label id="statsCustomMonthWrap" class="period-picker" hidden>指定月份<input id="statsCustomMonth" type="month" /></label>
-            <label id="statsCustomRangeWrap" class="period-picker range-picker" hidden><span>自定义日期</span><div><input id="statsRangeStart" type="date" /><b>至</b><input id="statsRangeEnd" type="date" /></div></label>
-          </div>
-          <div class="month-quick-row" id="statsMonthQuick" hidden></div>
-          <div class="period-summary-card">
-            <div class="period-title"><span id="statsPeriodLabel">本月</span><small>工作与到账</small></div>
-            <div class="period-metrics">
-              <div><span>成品</span><strong id="statsPeriodDuration">0 分钟</strong></div>
-              <div><span>应收</span><strong id="statsPeriodReceivable">¥0.00</strong></div>
-              <div><span>实际到账</span><strong id="statsPeriodReceived">¥0.00</strong></div>
-              <div><span>期末未收</span><strong id="statsPeriodOutstanding">¥0.00</strong></div>
-              <div><span>记录</span><strong id="statsPeriodRecords">0 条</strong></div>
-            </div>
-          </div>
-        </section>
-
-        <section class="section-block" id="annualReportBlock">
-          <div class="section-head"><div><h2>年度报告</h2><p id="annualReportSub">全年工作概览</p></div></div>
-          <div class="annual-report" id="annualReport"></div>
-        </section>
-
-        <section class="section-block">
-          <div class="section-head"><div><h2>按平台统计</h2><p>按当前统计周期汇总</p></div></div>
-          <div class="card-list" id="statsPlatformList"></div>
-        </section>
-
-        <section class="section-block">
-          <div class="section-head"><div><h2>按甲方统计</h2><p>按当前统计周期汇总，点一下可跳到对应书库</p></div></div>
-          <div class="card-list" id="statsClientList"></div>
-        </section>
-
-        <section class="section-block">
-          <div class="section-head">
-            <div>
-              <h2>按书统计</h2>
-              <p>累计时长、应收、已收、未收</p>
-            </div>
-          </div>
-          <div class="card-list" id="statsBookList"></div>
+        <section class="section-block analytics-card">
+          <div class="section-head analytics-head"><div><h2>分类统计</h2><p id="statsDimensionRange">当前范围：本月</p></div><select id="statsDimension" class="compact-select"><option value="book">按书籍</option><option value="client">按甲方</option><option value="platform">按平台</option></select></div>
+          <div class="card-list" id="statsDimensionList"></div>
         </section>
       </section>
 
-      <section class="view" id="view-settings" aria-labelledby="tab-settings">
-        <div class="page-head"><div><div class="eyebrow">数据与迁移</div><h2>设置</h2></div></div>
-        <section class="settings-card">
-          <h3>火山云 OCR</h3>
-          <p>0.7 延续已稳定的火山引擎云端 OCR。本机只负责拍照与显示结果；云端返回文字与位置后，再按同一行整理书名、集数和时长。</p>
-          <label class="cloud-setting-label">Cloudflare Worker 地址<input id="cloudOcrEndpoint" type="url" inputmode="url" placeholder="https://voiceledger-ocr.xxx.workers.dev" /></label>
-          <div class="settings-action-row">
-            <button class="primary-wide" id="saveCloudOcrBtn" type="button">保存识别服务</button>
-            <button class="secondary-wide" id="testCloudOcrBtn" type="button">测试连接</button>
-          </div>
-          <div id="cloudOcrStatus" class="cloud-status">尚未配置</div>
-          <p class="helper left-helper">火山引擎 AK/SK 不会放进 GitHub 网页；它们只保存在 Cloudflare Worker 的 Secret 里。</p>
+      <section class="view subview" id="view-stats-history">
+        <div class="subview-head"><button class="back-btn" type="button" data-back-view="stats">‹</button><div><div class="eyebrow">统计 · 二级页面</div><h2>往期统计</h2></div></div>
+        <section class="control-card">
+          <label>统计范围<select id="statsPeriodSelect"><option value="month">本月</option><option value="year">今年</option><option value="yearPick">指定年份</option><option value="customMonth">指定月份</option><option value="customRange">自定义日期</option><option value="all">全部历史</option></select></label>
+          <div class="period-picker-row"><label id="statsYearWrap" class="period-picker" hidden>年份<select id="statsYearSelect"></select></label><label id="statsCustomMonthWrap" class="period-picker" hidden>指定月份<input id="statsCustomMonth" type="month" /></label><label id="statsCustomRangeWrap" class="period-picker range-picker" hidden><span>自定义日期</span><div><input id="statsRangeStart" type="date" /><b>至</b><input id="statsRangeEnd" type="date" /></div></label></div><div class="month-quick-row" id="statsMonthQuick" hidden></div>
         </section>
+        <div class="period-summary-card history-summary"><div class="period-title"><span id="statsPeriodLabel">本月</span><small>工作与到账</small></div><div class="period-metrics"><div><span>成品</span><strong id="statsPeriodDuration">0 分钟</strong></div><div><span>应收</span><strong id="statsPeriodReceivable">¥0.00</strong></div><div><span>实际到账</span><strong id="statsPeriodReceived">¥0.00</strong></div><div><span>期末未收</span><strong id="statsPeriodOutstanding">¥0.00</strong></div><div><span>记录</span><strong id="statsPeriodRecords">0 条</strong></div></div></div>
+        <section class="section-block"><div class="section-head"><div><h2>这个周期的书</h2><p>只显示当前统计范围内有数据的项目</p></div></div><div class="card-list" id="historyBookList"></div></section>
+      </section>
 
-        <section class="settings-card">
-          <h3>工作日与目标</h3>
-          <p>“今天”按你的工作作息计算。默认早上 06:00 才切换到新工作日。</p>
-          <label class="cloud-setting-label">每日工作日切换时间<input id="workdayCutoff" type="time" value="06:00" /></label>
-          <div class="form-grid-2">
-            <label>今日成品目标（分钟）<input id="dailyGoalMinutes" type="number" inputmode="numeric" min="0" step="1" placeholder="60" /></label>
-            <label>本月成品目标（小时）<input id="monthlyGoalHours" type="number" inputmode="decimal" min="0" step="0.5" placeholder="25" /></label>
-          </div>
-          <button class="primary-wide" id="saveWorkSettingsBtn" type="button">保存工作设置</button>
-        </section>
+      <section class="view subview" id="view-stats-annual">
+        <div class="subview-head"><button class="back-btn" type="button" data-back-view="stats">‹</button><div><div class="eyebrow">统计 · 二级页面</div><h2>年度报告</h2></div><select id="annualYearSelect" class="compact-select"></select></div>
+        <p class="page-intro" id="annualReportSub">全年工作概览</p><div class="annual-report" id="annualReport"></div>
+      </section>
 
-        <section class="settings-card">
-          <h3>我的数据</h3>
-          <p>声账的数据目前保存在这台设备的浏览器里。导出备份后，可以留存、发给我检查，或带到以后版本继续使用。</p>
-          <div id="settingsDataSummary"></div>
-          <button class="primary-wide" id="exportDataBtn" type="button">导出 JSON 备份</button>
-          <button class="secondary-wide" id="importDataBtn" type="button">导入 JSON 备份</button>
-          <div class="export-panel">
-            <h4>导出 CSV 流水（Excel / Numbers 可直接打开）</h4>
-            <div class="form-grid-2">
-              <label>导出范围<select id="csvScope"><option value="all">全部历史</option><option value="year">指定年份</option><option value="month">指定月份</option><option value="client">指定甲方</option><option value="book">指定书籍</option></select></label>
-              <label id="csvYearWrap" hidden>年份<select id="csvYear"></select></label>
-              <label id="csvMonthWrap" hidden>月份<input id="csvMonth" type="month" /></label>
-              <label id="csvClientWrap" hidden>甲方<select id="csvClient"></select></label>
-              <label id="csvBookWrap" hidden>书籍<select id="csvBook"></select></label>
-            </div>
-            <button class="manual-wide" id="exportCsvBtn" type="button">导出 CSV 流水</button>
-          </div>
-          <input id="importDataInput" type="file" accept="application/json,.json" hidden />
-        </section>
-        <section class="settings-card note-card">
-          <h3>0.7 Beta 数据说明</h3>
-          <p>跨月后，旧记录不会被删除；本月数字只是一个筛选视图。建议偶尔导出一次备份，防止浏览器缓存被清理。</p>
-        </section>
+      <section class="view subview" id="view-metric-detail">
+        <div class="subview-head"><button class="back-btn" type="button" id="metricBackBtn">‹</button><div><div class="eyebrow">数据明细</div><h2 id="metricDetailTitle">明细</h2></div></div>
+        <div id="metricDetailContent"></div>
+      </section>
+
+      <section class="view" id="view-settings">
+        <div class="subview-head"><button class="back-btn" type="button" id="settingsBackBtn">‹</button><div><div class="eyebrow">偏好与数据</div><h2>设置</h2></div></div>
+        <section class="settings-card"><h3>工作日与目标</h3><p>“今天”按你的工作作息计算。默认早上 06:00 才切换到新工作日。</p><label class="cloud-setting-label">每日工作日切换时间<input id="workdayCutoff" type="time" value="06:00" /></label><div class="form-grid-2"><label>今日成品目标（分钟）<input id="dailyGoalMinutes" type="number" inputmode="numeric" min="0" step="1" placeholder="60" /></label><label>本月成品目标（小时）<input id="monthlyGoalHours" type="number" inputmode="decimal" min="0" step="0.5" placeholder="25" /></label></div><button class="primary-wide" id="saveWorkSettingsBtn" type="button">保存工作设置</button></section>
+        <section class="settings-card"><h3>火山云 OCR</h3><p>0.8 不改已经稳定的 OCR 链路；识别仍通过 Cloudflare Worker 调用火山引擎 OCRNormal。</p><label class="cloud-setting-label">Cloudflare Worker 地址<input id="cloudOcrEndpoint" type="url" inputmode="url" placeholder="https://voiceledger-ocr.xxx.workers.dev" /></label><div class="settings-action-row"><button class="primary-wide" id="saveCloudOcrBtn" type="button">保存识别服务</button><button class="secondary-wide" id="testCloudOcrBtn" type="button">测试连接</button></div><div id="cloudOcrStatus" class="cloud-status">尚未配置</div></section>
+        <section class="settings-card"><h3>我的数据</h3><p>业务数据仍保存在本机。JSON 用于完整备份/迁移，CSV 用于 Excel 或 Numbers 查看。</p><div id="settingsDataSummary"></div><button class="primary-wide" id="exportDataBtn" type="button">导出 JSON 备份</button><button class="secondary-wide" id="importDataBtn" type="button">导入 JSON 备份</button><div class="export-panel"><h4>导出 CSV 流水</h4><div class="form-grid-2"><label>导出范围<select id="csvScope"><option value="all">全部历史</option><option value="year">指定年份</option><option value="month">指定月份</option><option value="client">指定甲方</option><option value="book">指定书籍</option></select></label><label id="csvYearWrap" hidden>年份<select id="csvYear"></select></label><label id="csvMonthWrap" hidden>月份<input id="csvMonth" type="month" /></label><label id="csvClientWrap" hidden>甲方<select id="csvClient"></select></label><label id="csvBookWrap" hidden>书籍<select id="csvBook"></select></label></div><button class="manual-wide" id="exportCsvBtn" type="button">导出 CSV 流水</button></div><input id="importDataInput" type="file" accept="application/json,.json" hidden /></section>
+        <section class="settings-card changelog-card"><div class="section-head changelog-head"><div><h3>版本更新日志</h3><p>从最早的移动版原型一路记录到现在。</p></div><span class="version-badge">0.8 Beta</span></div><div id="changelogList" class="changelog-list"></div></section>
       </section>
     </main>
 
-    <nav class="tabbar" aria-label="主导航">
-      <button class="tab active" id="tab-home" data-view="home" type="button"><span>⌂</span><b>首页</b></button>
-      <button class="tab" id="tab-books" data-view="books" type="button"><span>▤</span><b>书库</b></button>
-      <button class="tab tab-camera" id="tab-camera" data-view="camera" type="button"><span class="camera-tab-icon">⌁</span><b>拍照</b></button>
-      <button class="tab" id="tab-settlement" data-view="settlement" type="button"><span>¥</span><b>结算</b></button>
-      <button class="tab" id="tab-stats" data-view="stats" type="button"><span>▥</span><b>统计</b></button>
-      <button class="tab" id="tab-settings" data-view="settings" type="button"><span>⚙</span><b>设置</b></button>
-    </nav>
+    <nav class="tabbar" aria-label="主导航"><button class="tab active" id="tab-home" data-view="home" type="button"><span>⌂</span><b>首页</b></button><button class="tab" id="tab-books" data-view="books" type="button"><span>▤</span><b>书库</b></button><button class="tab tab-camera" id="tab-camera" data-view="camera" type="button"><span class="camera-tab-icon">⌁</span><b>拍照</b></button><button class="tab" id="tab-settlement" data-view="settlement" type="button"><span>¥</span><b>结算</b></button><button class="tab" id="tab-stats" data-view="stats" type="button"><span>▥</span><b>统计</b></button></nav>
   </div>
 
-  <div class="modal" id="bookModal" aria-hidden="true">
-    <div class="modal-backdrop" data-close="bookModal"></div>
-    <div class="sheet tall-sheet">
-      <div class="sheet-handle"></div>
-      <div class="sheet-head">
-        <div>
-          <div class="eyebrow">有声书项目</div>
-          <h3 id="bookModalTitle">新建书籍</h3>
-        </div>
-        <button class="close-btn" data-close="bookModal" type="button">×</button>
-      </div>
-      <form id="bookForm" class="form-stack">
-        <input type="hidden" id="bookId" />
-        <label>正式书名<input id="bookTitle" required placeholder="例如：双修之天下第一" /></label>
-        <label>文件简称<input id="bookAlias" required placeholder="例如：双修" /></label>
-        <label>甲方名称<input id="bookClient" placeholder="例如：某工作室 / 对接人" /></label>
-        <label>平台
-          <select id="bookPlatform">
-            <option value="">请选择</option>
-            <option>喜马拉雅</option>
-            <option>番茄畅听</option>
-            <option>懒人听书</option>
-            <option>蜻蜓FM</option>
-            <option>其他</option>
-          </select>
-        </label>
-        <div class="form-grid-2">
-          <label>角色类型
-            <select id="bookRoleType">
-              <option value="">请选择</option>
-              <option>男主</option>
-              <option>男配</option>
-              <option>旁白</option>
-              <option>其他</option>
-            </select>
-          </label>
-          <label>角色名<input id="bookRoleName" placeholder="角色名" /></label>
-        </div>
-        <label>成品小时单价（元）<input id="bookRate" type="number" inputmode="decimal" min="0" step="0.01" placeholder="250" /></label>
-        <label>项目状态
-          <select id="bookStatus">
-            <option value="ongoing">连载中</option>
-            <option value="paused">暂停</option>
-            <option value="finished">已完结</option>
-          </select>
-        </label>
-        <button class="primary-wide" type="submit">保存项目</button>
-      </form>
-    </div>
-  </div>
-
-  <div class="modal" id="bookDetailModal" aria-hidden="true">
-    <div class="modal-backdrop" data-close="bookDetailModal"></div>
-    <div class="sheet full-sheet">
-      <div class="sheet-handle"></div>
-      <div class="sheet-head">
-        <div>
-          <div class="eyebrow" id="detailAlias">简称</div>
-          <h3 id="detailTitle">书名</h3>
-        </div>
-        <button class="close-btn" data-close="bookDetailModal" type="button">×</button>
-      </div>
-      <div id="bookDetailContent"></div>
-    </div>
-  </div>
-
-  <div class="modal" id="settlementModal" aria-hidden="true">
-    <div class="modal-backdrop" data-close="settlementModal"></div>
-    <div class="sheet">
-      <div class="sheet-handle"></div>
-      <div class="sheet-head">
-        <div>
-          <div class="eyebrow">结算记录</div>
-          <h3 id="settlementBookName">新增结算</h3>
-        </div>
-        <button class="close-btn" data-close="settlementModal" type="button">×</button>
-      </div>
-      <form id="settlementForm" class="form-stack">
-        <input type="hidden" id="settlementBookId" />
-        <label>结算到第几集<input id="settlementTo" type="number" inputmode="numeric" min="1" required placeholder="200" /></label>
-        <label>本次实际到账（元）<input id="settlementAmount" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="3250" /></label>
-        <label>结算日期<input id="settlementDate" type="date" required /></label>
-        <button class="primary-wide" type="submit">保存结算</button>
-      </form>
-    </div>
-  </div>
-
-  <div class="modal" id="recordModal" aria-hidden="true">
-    <div class="modal-backdrop" data-close="recordModal"></div>
-    <div class="sheet">
-      <div class="sheet-handle"></div>
-      <div class="sheet-head"><div><div class="eyebrow">录音记录</div><h3>编辑记录</h3></div><button class="close-btn" data-close="recordModal" type="button">×</button></div>
-      <form id="recordForm" class="form-stack">
-        <input type="hidden" id="recordId" />
-        <label>归入书籍<select id="recordBookId"></select></label>
-        <div class="form-grid-2"><label>起始集<input id="recordEpisodeStart" type="number" inputmode="numeric" min="1" /></label><label>结束集<input id="recordEpisodeEnd" type="number" inputmode="numeric" min="1" /></label></div>
-        <label>成品时长<input id="recordDuration" inputmode="numeric" placeholder="2523 → 25:23" /></label>
-        <label>工作日期<input id="recordWorkDate" type="date" /></label>
-        <button class="primary-wide" type="submit">保存修改</button>
-        <button class="danger-wide" id="deleteRecordBtn" type="button">删除这条记录</button>
-      </form>
-    </div>
-  </div>
-
+  <div class="modal" id="bookModal" aria-hidden="true"><div class="modal-backdrop" data-close="bookModal"></div><div class="sheet tall-sheet"><div class="sheet-handle"></div><div class="sheet-head"><div><div class="eyebrow">有声书项目</div><h3 id="bookModalTitle">新建书籍</h3></div><button class="close-btn" data-close="bookModal" type="button">×</button></div><form id="bookForm" class="form-stack"><input type="hidden" id="bookId" /><label>正式书名<input id="bookTitle" required placeholder="例如：双修之天下第一" /></label><label>文件简称<input id="bookAlias" required placeholder="例如：双修" /></label><label>甲方名称<input id="bookClient" placeholder="例如：某工作室 / 对接人" /></label><label>平台<select id="bookPlatform"><option value="">请选择</option><option>喜马拉雅</option><option>番茄畅听</option><option>懒人听书</option><option>蜻蜓FM</option><option>其他</option></select></label><div class="form-grid-2"><label>角色类型<select id="bookRoleType"><option value="">请选择</option><option>男主</option><option>男配</option><option>旁白</option><option>其他</option></select></label><label>角色名<input id="bookRoleName" placeholder="角色名" /></label></div><label>成品小时单价（元）<input id="bookRate" type="number" inputmode="decimal" min="0" step="0.01" placeholder="250" /></label><label>项目状态<select id="bookStatus"><option value="ongoing">连载中</option><option value="paused">暂停</option><option value="finished">已完结</option></select></label><button class="primary-wide" type="submit">保存项目</button></form></div></div>
+  <div class="modal" id="bookDetailModal" aria-hidden="true"><div class="modal-backdrop" data-close="bookDetailModal"></div><div class="sheet full-sheet"><div class="sheet-handle"></div><div class="sheet-head"><div><div class="eyebrow" id="detailAlias">简称</div><h3 id="detailTitle">书名</h3></div><button class="close-btn" data-close="bookDetailModal" type="button">×</button></div><div id="bookDetailContent"></div></div></div>
+  <div class="modal" id="settlementModal" aria-hidden="true"><div class="modal-backdrop" data-close="settlementModal"></div><div class="sheet"><div class="sheet-handle"></div><div class="sheet-head"><div><div class="eyebrow">结算记录</div><h3 id="settlementBookName">新增结算</h3></div><button class="close-btn" data-close="settlementModal" type="button">×</button></div><form id="settlementForm" class="form-stack"><input type="hidden" id="settlementBookId" /><label>结算到第几集<input id="settlementTo" type="number" inputmode="numeric" min="1" required placeholder="200" /></label><label>本次实际到账（元）<input id="settlementAmount" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="3250" /></label><label>结算日期<input id="settlementDate" type="date" required /></label><button class="primary-wide" type="submit">保存结算</button></form></div></div>
+  <div class="modal" id="recordModal" aria-hidden="true"><div class="modal-backdrop" data-close="recordModal"></div><div class="sheet"><div class="sheet-handle"></div><div class="sheet-head"><div><div class="eyebrow">录音记录</div><h3>编辑记录</h3></div><button class="close-btn" data-close="recordModal" type="button">×</button></div><form id="recordForm" class="form-stack"><input type="hidden" id="recordId" /><label>归入书籍<select id="recordBookId"></select></label><div class="form-grid-2"><label>起始集<input id="recordEpisodeStart" type="number" inputmode="numeric" min="1" /></label><label>结束集<input id="recordEpisodeEnd" type="number" inputmode="numeric" min="1" /></label></div><label>成品时长<input id="recordDuration" inputmode="numeric" placeholder="2523 → 25:23" /></label><label>工作日期<input id="recordWorkDate" type="date" /></label><button class="primary-wide" type="submit">保存修改</button><button class="danger-wide" id="deleteRecordBtn" type="button">删除这条记录</button></form></div></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-
-  <script src="./app.js?v=0.7"></script>
+  <script src="./app.js?v=0.8"></script>
 </body>
 </html>
