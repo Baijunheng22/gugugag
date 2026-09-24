@@ -1,6 +1,9 @@
 const STORAGE_KEY = 'voiceledger_02_data';
 const CLOUD_OCR_ENDPOINT_KEY = 'voiceledger_cloud_ocr_endpoint';
 const WORK_SETTINGS_KEY = 'voiceledger_07_work_settings';
+const SNAPSHOT_KEY = 'voiceledger_09_snapshots';
+const APP_VERSION = '0.9-beta';
+const SCHEMA_VERSION = '0.9';
 
 function localISODate(date = new Date()) {
   const y = date.getFullYear();
@@ -39,6 +42,7 @@ const state = {
   bookFilter: 'all',
   platformFilter: 'all',
   clientFilter: 'all',
+  sourceFilter: 'all',
   bookSort: 'default',
   bookSortDir: 'desc',
   settlementView: 'book',
@@ -57,6 +61,8 @@ const state = {
   metricDetail: null,
   metricReturnView: 'home',
   ocrDrafts: [],
+  guaguaDrafts: [],
+  guaguaMonth: currentYM(),
   selectedDetailBookId: null,
 };
 
@@ -78,36 +84,72 @@ function migrateLegacyWorkDates(out){
   }
   out.meta.workDateMigration08={doneAt:new Date().toISOString(),changed,checked,rule:`${workSettingsCache?.cutoff||'06:00'} cutoff`};
 }
+function readSnapshots(){
+  try{const x=JSON.parse(localStorage.getItem(SNAPSHOT_KEY));return Array.isArray(x)?x:[];}catch(_){return [];}
+}
+function writeSnapshots(list){
+  try{localStorage.setItem(SNAPSHOT_KEY,JSON.stringify((Array.isArray(list)?list:[]).slice(0,6)));}catch(_){}
+}
+function snapshotPayload(data,label,reason='manual'){
+  return {id:uid('snap'),label,reason,createdAt:new Date().toISOString(),version:data?.meta?.schemaVersion||'0.8-or-earlier',payload:{app:'VoiceLedger',version:data?.meta?.schemaVersion||'pre-0.9',exportedAt:new Date().toISOString(),workSettings:{...workSettingsCache},data:JSON.parse(JSON.stringify(data||{}))}};
+}
+function createSnapshot(data,label,reason='manual'){
+  const list=readSnapshots();list.unshift(snapshotPayload(data,label,reason));writeSnapshots(list);return list[0];
+}
 function normalizeDataShape(data){
   const out=data&&typeof data==='object'?data:{};
   out.books=Array.isArray(out.books)?out.books:[];
   out.records=Array.isArray(out.records)?out.records:[];
   out.settlements=Array.isArray(out.settlements)?out.settlements:[];
+  out.guaguaEntries=Array.isArray(out.guaguaEntries)?out.guaguaEntries:[];
   out.trashRecords=Array.isArray(out.trashRecords)?out.trashRecords:[];
+  out.activityLog=Array.isArray(out.activityLog)?out.activityLog:[];
   out.meta=out.meta&&typeof out.meta==='object'?out.meta:{};
+  for(const b of out.books){
+    if(!b.source)b.source='au';
+    if(b.pinned==null)b.pinned=false;
+    if(b.archived==null)b.archived=false;
+  }
   for(const r of out.records){
     if(!r.workDate)r.workDate=r.date||todayISO();
     if(!r.date)r.date=r.workDate;
     if(r.workDateManual==null)r.workDateManual=true;
   }
+  for(const g of out.guaguaEntries){
+    if(!g.month)g.month=String(g.settlementDate||todayISO()).slice(0,7);
+    if(!Number.isFinite(Number(g.durationSec))){
+      const rate=Number(g.rate)||0,amount=Number(g.amount)||0,work=Number(g.workloadHours)||0;
+      g.durationSec=rate>0&&amount>=0?Math.round(amount/rate*3600):Math.round(work*3600);
+    }
+  }
   migrateLegacyWorkDates(out);
+  out.meta.schemaVersion=SCHEMA_VERSION;
   return out;
 }
 function loadData() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    const rawText=localStorage.getItem(STORAGE_KEY);
+    const parsed = JSON.parse(rawText);
     if (parsed && Array.isArray(parsed.books) && Array.isArray(parsed.records) && Array.isArray(parsed.settlements)) {
+      if(parsed?.meta?.schemaVersion!==SCHEMA_VERSION){
+        createSnapshot(parsed,`升级前快照 · ${parsed?.meta?.schemaVersion||'0.8及更早'} → 0.9`,'upgrade');
+      }
       const normalized=normalizeDataShape(parsed);
       localStorage.setItem(STORAGE_KEY,JSON.stringify(normalized));
       return normalized;
     }
   } catch (_) {}
-  return normalizeDataShape({ books: [], records: [], settlements: [], trashRecords: [], meta:{} });
+  return normalizeDataShape({ books: [], records: [], settlements: [], guaguaEntries:[], trashRecords: [], activityLog:[], meta:{} });
 }
 function saveData(){
   state.data=normalizeDataShape(state.data);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.data));
   renderAll();
+}
+function logActivity(type,text,meta={}){
+  state.data.activityLog=Array.isArray(state.data.activityLog)?state.data.activityLog:[];
+  state.data.activityLog.unshift({id:uid('act'),type,text,meta,createdAt:new Date().toISOString()});
+  state.data.activityLog=state.data.activityLog.slice(0,120);
 }
 function saveWorkSettings(){workSettingsCache={...state.workSettings};localStorage.setItem(WORK_SETTINGS_KEY,JSON.stringify(state.workSettings));}
 function recordWorkDate(rec){
@@ -179,39 +221,54 @@ function formatDurationInput(v){
   return secToClock(sec);
 }
 
+function sourceText(source){return source==='guagua'?'呱呱录音宝':'AU';}
+function sourceShort(source){return source==='guagua'?'呱呱':'AU';}
 function recordAmount(rec){
   const book=bookById(rec.bookId); if(!book) return 0;
   const rate=Number.isFinite(Number(rec.rateSnapshot))?Number(rec.rateSnapshot):Number(book.rate)||0;
   return (Number(rec.durationSec)||0)/3600*rate;
 }
+function guaguaEntryDuration(entry){
+  const stored=Number(entry?.durationSec);if(Number.isFinite(stored)&&stored>=0)return stored;
+  const rate=Number(entry?.rate)||0,amount=Number(entry?.amount)||0,work=Number(entry?.workloadHours)||0;
+  return rate>0&&amount>=0?Math.round(amount/rate*3600):Math.round(work*3600);
+}
+function guaguaEntryAmount(entry){return Number(entry?.amount)||0;}
 function bookById(id){ return state.data.books.find(b=>b.id===id); }
 function recordsForBook(id){ return state.data.records.filter(r=>r.bookId===id).sort((a,b)=>`${recordWorkDate(b)}${b.createdAt||''}`.localeCompare(`${recordWorkDate(a)}${a.createdAt||''}`)); }
 function settlementsForBook(id){ return state.data.settlements.filter(s=>s.bookId===id).sort((a,b)=>`${b.date}${b.createdAt}`.localeCompare(`${a.date}${a.createdAt}`)); }
+function guaguaEntriesForBook(id){return state.data.guaguaEntries.filter(g=>g.bookId===id).sort((a,b)=>`${b.month||''}${b.importedAt||''}`.localeCompare(`${a.month||''}${a.importedAt||''}`));}
 function bookTotals(id){
-  const rs=recordsForBook(id);
-  const duration=rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0);
-  const receivable=rs.reduce((a,r)=>a+recordAmount(r),0);
-  const received=settlementsForBook(id).reduce((a,s)=>a+(Number(s.amount)||0),0);
+  const rs=recordsForBook(id),gs=guaguaEntriesForBook(id),ss=settlementsForBook(id);
+  const auDuration=rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0), guaguaDuration=gs.reduce((a,g)=>a+guaguaEntryDuration(g),0);
+  const auReceivable=rs.reduce((a,r)=>a+recordAmount(r),0), guaguaReceivable=gs.reduce((a,g)=>a+guaguaEntryAmount(g),0);
+  const manualReceived=ss.reduce((a,s)=>a+(Number(s.amount)||0),0), guaguaReceived=gs.reduce((a,g)=>a+guaguaEntryAmount(g),0);
+  const duration=auDuration+guaguaDuration,receivable=auReceivable+guaguaReceivable,received=manualReceived+guaguaReceived;
   const currentProgress=rs.reduce((m,r)=>Math.max(m,Number(r.episodeEnd)||0),0);
-  const settledTo=settlementsForBook(id).reduce((m,s)=>Math.max(m,Number(s.settlementTo)||0),0);
+  const settledTo=ss.reduce((m,s)=>Math.max(m,Number(s.settlementTo)||0),0);
   let settlement='unpaid';
-  if(settledTo>0 || received>0) settlement = currentProgress>0 && settledTo>=currentProgress ? 'paid' : 'partial';
-  return {duration,receivable,received,unreceived:receivable-received,currentProgress,settledTo,settlement};
+  if(gs.length&&!rs.length)settlement='paid';
+  else if(settledTo>0 || manualReceived>0) settlement = currentProgress>0 && settledTo>=currentProgress ? 'paid' : 'partial';
+  return {duration,receivable,received,unreceived:receivable-received,currentProgress,settledTo,settlement,auDuration,guaguaDuration,auReceivable,guaguaReceivable};
 }
 function settlementLabel(s){ return ({unpaid:'未结算',partial:'部分结算',paid:'已结清'})[s] || '未结算'; }
 function dateIsThisMonth(date){ return String(date||'').slice(0,7)===currentYM(); }
 function dayTotals(date=todayWorkDate()){
   const rs=state.data.records.filter(r=>recordWorkDate(r)===date);
-  return {duration:rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0),income:rs.reduce((a,r)=>a+recordAmount(r),0)};
+  return {duration:rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0),income:rs.reduce((a,r)=>a+recordAmount(r),0),auDuration:rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0),guaguaDuration:0};
 }
+function guaguaMonthEntries(ym=currentYM()){return state.data.guaguaEntries.filter(g=>String(g.month||'')===ym);}
 function monthTotals(ym=currentYM()){
-  const rs=state.data.records.filter(r=>recordWorkDate(r).slice(0,7)===ym);
-  return {duration:rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0),income:rs.reduce((a,r)=>a+recordAmount(r),0)};
+  const rs=state.data.records.filter(r=>recordWorkDate(r).slice(0,7)===ym),gs=guaguaMonthEntries(ym);
+  const auDuration=rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0),guaguaDuration=gs.reduce((a,g)=>a+guaguaEntryDuration(g),0);
+  const auIncome=rs.reduce((a,r)=>a+recordAmount(r),0),guaguaIncome=gs.reduce((a,g)=>a+guaguaEntryAmount(g),0);
+  return {duration:auDuration+guaguaDuration,income:auIncome+guaguaIncome,auDuration,guaguaDuration,auIncome,guaguaIncome,auRecords:rs.length,guaguaRows:gs.length};
 }
 function availableYears(){
   const years=[];
   for(const r of state.data.records)years.push(Number(recordWorkDate(r).slice(0,4)));
   for(const s of state.data.settlements)years.push(Number(String(s.date||'').slice(0,4)));
+  for(const g of state.data.guaguaEntries)years.push(Number(String(g.month||'').slice(0,4)));
   years.push(Number(todayWorkDate().slice(0,4)));
   return [...new Set(years.filter(Number.isFinite))].sort((a,b)=>b-a);
 }
@@ -237,26 +294,47 @@ function dateInBounds(date,bounds=statsPeriodBounds()){
   if(bounds.start&&v<bounds.start)return false; if(bounds.end&&v>bounds.end)return false; return true;
 }
 function dateInStatsPeriod(date){return dateInBounds(date);}
+function guaguaEntryInBounds(entry,bounds=statsPeriodBounds()){
+  const ym=String(entry?.month||'');if(!/^\d{4}-\d{2}$/.test(ym))return false;
+  const mb=boundsForMonth(ym);
+  if(state.statsPeriod==='customRange'){
+    // 月账没有每天粒度；只有自定义范围完整覆盖该月时才纳入，避免把月账伪装成某一天数据。
+    return (!bounds.start||bounds.start<=mb.start)&&(!bounds.end||bounds.end>=mb.end);
+  }
+  return (!bounds.start||mb.end>=bounds.start)&&(!bounds.end||mb.start<=bounds.end);
+}
+function guaguaEntriesInBounds(bounds=statsPeriodBounds()){return state.data.guaguaEntries.filter(g=>guaguaEntryInBounds(g,bounds));}
 function outstandingAsOf(endDate=null){
   const rs=state.data.records.filter(r=>!endDate||recordWorkDate(r)<=endDate);
   const ss=state.data.settlements.filter(s=>!endDate||String(s.date||'')<=endDate);
   const receivable=rs.reduce((a,r)=>a+recordAmount(r),0), received=ss.reduce((a,s)=>a+(Number(s.amount)||0),0);
+  // 呱呱月账导入时已经带官方结算金额，既计应收也计已收，因此不会制造“未收”。
   return receivable-received;
 }
 function statsPeriodTotals(){
   const bounds=statsPeriodBounds();
   const rs=state.data.records.filter(r=>dateInBounds(recordWorkDate(r),bounds));
   const ss=state.data.settlements.filter(s=>dateInBounds(s.date,bounds));
+  const gs=guaguaEntriesInBounds(bounds);
+  const guaAmount=gs.reduce((a,g)=>a+guaguaEntryAmount(g),0);
   return {
-    duration:rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0),
-    receivable:rs.reduce((a,r)=>a+recordAmount(r),0),
-    received:ss.reduce((a,s)=>a+(Number(s.amount)||0),0),
+    duration:rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0)+gs.reduce((a,g)=>a+guaguaEntryDuration(g),0),
+    receivable:rs.reduce((a,r)=>a+recordAmount(r),0)+guaAmount,
+    received:ss.reduce((a,s)=>a+(Number(s.amount)||0),0)+guaAmount,
     outstanding:outstandingAsOf(bounds.end),
-    records:rs.length,
+    records:rs.length+gs.length,
+    auRecords:rs.length,guaguaRows:gs.length,
   };
 }
 function groupedPeriodStats(key){
-  const groups=new Map(),bounds=statsPeriodBounds();
+  const bounds=statsPeriodBounds();
+  if(key==='source'){
+    const rs=state.data.records.filter(r=>dateInBounds(recordWorkDate(r),bounds)),gs=guaguaEntriesInBounds(bounds);
+    const au={name:'AU',duration:rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0),receivable:rs.reduce((a,r)=>a+recordAmount(r),0),received:state.data.settlements.filter(s=>dateInBounds(s.date,bounds)).reduce((a,s)=>a+(Number(s.amount)||0),0),bookIds:[...new Set(rs.map(r=>r.bookId))]};
+    const guaAmount=gs.reduce((a,g)=>a+guaguaEntryAmount(g),0),gua={name:'呱呱录音宝',duration:gs.reduce((a,g)=>a+guaguaEntryDuration(g),0),receivable:guaAmount,received:guaAmount,bookIds:[...new Set(gs.map(g=>g.bookId))]};
+    return [au,gua].filter(g=>g.duration||g.receivable||g.received);
+  }
+  const groups=new Map();
   for(const book of state.data.books){
     const name=String(book[key]||'').trim() || (key==='platform'?'未填写平台':'未填写甲方');
     if(!groups.has(name))groups.set(name,{name,duration:0,receivable:0,received:0,bookIds:[]});
@@ -266,9 +344,11 @@ function groupedPeriodStats(key){
     const set=new Set(g.bookIds);
     const rs=state.data.records.filter(r=>set.has(r.bookId)&&dateInBounds(recordWorkDate(r),bounds));
     const ss=state.data.settlements.filter(s=>set.has(s.bookId)&&dateInBounds(s.date,bounds));
-    g.duration=rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0);
-    g.receivable=rs.reduce((a,r)=>a+recordAmount(r),0);
-    g.received=ss.reduce((a,s)=>a+(Number(s.amount)||0),0);
+    const gs=guaguaEntriesInBounds(bounds).filter(x=>set.has(x.bookId));
+    const guaAmount=gs.reduce((a,x)=>a+guaguaEntryAmount(x),0);
+    g.duration=rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0)+gs.reduce((a,x)=>a+guaguaEntryDuration(x),0);
+    g.receivable=rs.reduce((a,r)=>a+recordAmount(r),0)+guaAmount;
+    g.received=ss.reduce((a,s)=>a+(Number(s.amount)||0),0)+guaAmount;
   }
   return [...groups.values()].filter(g=>g.duration||g.receivable||g.received).sort((a,b)=>b.receivable-a.receivable||b.received-a.received);
 }
@@ -279,23 +359,26 @@ function annualYearFromSelection(){
   return Number(todayWorkDate().slice(0,4));
 }
 function annualReportData(year=annualYearFromSelection()){
-  const prefix=String(year), rs=state.data.records.filter(r=>recordWorkDate(r).startsWith(prefix)), ss=state.data.settlements.filter(s=>String(s.date||'').startsWith(prefix));
-  const duration=rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0), receivable=rs.reduce((a,r)=>a+recordAmount(r),0), received=ss.reduce((a,s)=>a+(Number(s.amount)||0),0);
+  const prefix=String(year), rs=state.data.records.filter(r=>recordWorkDate(r).startsWith(prefix)), ss=state.data.settlements.filter(s=>String(s.date||'').startsWith(prefix)),gs=state.data.guaguaEntries.filter(g=>String(g.month||'').startsWith(prefix));
+  const guaAmount=gs.reduce((a,g)=>a+guaguaEntryAmount(g),0);
+  const duration=rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0)+gs.reduce((a,g)=>a+guaguaEntryDuration(g),0), receivable=rs.reduce((a,r)=>a+recordAmount(r),0)+guaAmount, received=ss.reduce((a,s)=>a+(Number(s.amount)||0),0)+guaAmount;
   const workDays=[...new Set(rs.map(recordWorkDate))];
   const monthMap=Array.from({length:12},(_,i)=>({month:i+1,duration:0,receivable:0}));
   for(const r of rs){const m=Number(recordWorkDate(r).slice(5,7));monthMap[m-1].duration+=Number(r.durationSec)||0;monthMap[m-1].receivable+=recordAmount(r);}
+  for(const g of gs){const m=Number(String(g.month).slice(5,7));if(m>=1&&m<=12){monthMap[m-1].duration+=guaguaEntryDuration(g);monthMap[m-1].receivable+=guaguaEntryAmount(g);}}
   const activeMonths=monthMap.filter(x=>x.duration>0||x.receivable>0);
   const busiest=activeMonths.slice().sort((a,b)=>b.duration-a.duration)[0]||null;
   const bestIncome=activeMonths.slice().sort((a,b)=>b.receivable-a.receivable)[0]||null;
   const byClient=new Map(),byBook=new Map();
   for(const r of rs){const b=bookById(r.bookId);if(!b)continue;const client=b.client||'未填写甲方';byClient.set(client,(byClient.get(client)||0)+recordAmount(r));const x=byBook.get(b.id)||{name:b.title,duration:0};x.duration+=Number(r.durationSec)||0;byBook.set(b.id,x);}
+  for(const g of gs){const b=bookById(g.bookId);if(!b)continue;const client=b.client||g.sourceName||'未填写甲方';byClient.set(client,(byClient.get(client)||0)+guaguaEntryAmount(g));const x=byBook.get(b.id)||{name:b.title,duration:0};x.duration+=guaguaEntryDuration(g);byBook.set(b.id,x);}
   const topClient=[...byClient].sort((a,b)=>b[1]-a[1])[0]||null;
   const topBook=[...byBook.values()].sort((a,b)=>b.duration-a.duration)[0]||null;
-  const finishedBooks=state.data.books.filter(b=>b.status==='finished'&&rs.some(r=>r.bookId===b.id)).length;
-  return {year,duration,receivable,received,outstanding:outstandingAsOf(`${year}-12-31`),workDays:workDays.length,avgDay:workDays.length?duration/workDays.length:0,avgMonth:activeMonths.length?receivable/activeMonths.length:0,finishedBooks,busiest,bestIncome,topClient,topBook,monthMap};
+  const usedIds=new Set([...rs.map(r=>r.bookId),...gs.map(g=>g.bookId)]),finishedBooks=state.data.books.filter(b=>b.status==='finished'&&usedIds.has(b.id)).length;
+  return {year,duration,receivable,received,outstanding:outstandingAsOf(`${year}-12-31`),workDays:workDays.length,avgDay:workDays.length?rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0)/workDays.length:0,avgMonth:activeMonths.length?receivable/activeMonths.length:0,finishedBooks,busiest,bestIncome,topClient,topBook,monthMap,guaguaDuration:gs.reduce((a,g)=>a+guaguaEntryDuration(g),0)};
 }
 function overallFinanceTotals(){
-  const receivable=state.data.records.reduce((a,r)=>a+recordAmount(r),0),received=state.data.settlements.reduce((a,s)=>a+(Number(s.amount)||0),0);
+  const gua=state.data.guaguaEntries.reduce((a,g)=>a+guaguaEntryAmount(g),0),receivable=state.data.records.reduce((a,r)=>a+recordAmount(r),0)+gua,received=state.data.settlements.reduce((a,s)=>a+(Number(s.amount)||0),0)+gua;
   return {receivable,received,unreceived:receivable-received};
 }
 function settlementClientGroups(){
@@ -306,7 +389,8 @@ function settlementClientGroups(){
 function latestBookTimestamp(bookId){
   const rs=state.data.records.filter(r=>r.bookId===bookId).map(r=>new Date(r.sourceTimestamp||r.createdAt||recordWorkDate(r)).getTime()).filter(Number.isFinite);
   const ss=state.data.settlements.filter(x=>x.bookId===bookId).map(x=>new Date(x.createdAt||x.date).getTime()).filter(Number.isFinite);
-  return Math.max(0,...rs,...ss);
+  const gs=state.data.guaguaEntries.filter(x=>x.bookId===bookId).map(x=>new Date(x.importedAt||`${x.month||'1970-01'}-01T12:00:00`).getTime()).filter(Number.isFinite);
+  return Math.max(0,...rs,...ss,...gs);
 }
 function sortDirectionLabel(dir){return dir==='asc'?'低 → 高':'高 → 低';}
 function compareValue(a,b,dir='desc'){
@@ -316,8 +400,9 @@ function compareValue(a,b,dir='desc'){
 }
 function sortedBooks(list){
   const arr=list.slice(); const key=state.bookSort;
-  if(key==='default')return arr;
+  if(key==='default')return arr.sort((a,b)=>Number(!!b.pinned)-Number(!!a.pinned)||latestBookTimestamp(b.id)-latestBookTimestamp(a.id)||a.title.localeCompare(b.title,'zh-CN'));
   return arr.sort((a,b)=>{
+    const pin=Number(!!b.pinned)-Number(!!a.pinned);if(pin)return pin;
     const ta=bookTotals(a.id),tb=bookTotals(b.id);
     const va=key==='duration'?ta.duration:key==='receivable'?ta.receivable:key==='rate'?Number(a.rate)||0:new Date(a.createdAt||0).getTime();
     const vb=key==='duration'?tb.duration:key==='receivable'?tb.receivable:key==='rate'?Number(b.rate)||0:new Date(b.createdAt||0).getTime();
@@ -326,6 +411,7 @@ function sortedBooks(list){
 }
 function settlementBooksFiltered(){
   return state.data.books.map(book=>({book,t:bookTotals(book.id)})).filter(({book,t})=>{
+    if(book.archived&&state.settlementStatusFilter==='outstanding')return false;
     if(state.settlementPlatformFilter!=='all'&&book.platform!==state.settlementPlatformFilter)return false;
     if(state.settlementClientFilter!=='all'&&book.client!==state.settlementClientFilter)return false;
     const f=state.settlementStatusFilter;
@@ -361,10 +447,11 @@ function recordsByBookCards(records,bounds=null){
 }
 
 function renderAll(){
-  renderHome(); renderLibraryFilters(); renderBooks(); renderSettlementFilters(); renderSettlementCenter(); renderStats(); renderSettingsSummary(); renderCloudOcrSettings(); renderWorkSettings(); renderExportOptions(); renderChangelog();
+  renderHome(); renderLibraryFilters(); renderBooks(); renderSettlementFilters(); renderSettlementCenter(); renderStats(); renderSettingsSummary(); renderCloudOcrSettings(); renderWorkSettings(); renderExportOptions(); renderSnapshots(); renderChangelog();
   if(state.currentView==='stats-history')renderStatsHistory();
   if(state.currentView==='stats-annual')renderAnnualReport();
   if(state.currentView==='metric-detail')renderMetricDetail();
+  if(state.currentView==='guagua-import')renderGuaguaImportState();
   if(state.selectedDetailBookId && document.getElementById('bookDetailModal').classList.contains('open')) renderBookDetail(state.selectedDetailBookId);
 }
 function renderGoals(td,mt){
@@ -374,29 +461,55 @@ function renderGoals(td,mt){
   $('#monthGoalText').textContent=monthlySec?`${secToText(mt.duration)} / ${secToText(monthlySec)} · ${Math.round(monthPct)}%`:'未设置';
   $('#todayGoalBar').style.width=`${dayPct}%`; $('#monthGoalBar').style.width=`${monthPct}%`;
 }
+function activityItems(){
+  const logged=(state.data.activityLog||[]).slice(0,20);
+  if(logged.length)return logged;
+  const synthesized=[];
+  for(const r of state.data.records.slice().sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))).slice(0,8)){
+    const b=bookById(r.bookId);synthesized.push({type:'record',text:`《${b?.title||'未匹配项目'}》新增 ${secToClock(r.durationSec)}`,createdAt:r.createdAt||`${recordWorkDate(r)}T12:00:00`});
+  }
+  for(const g of state.data.guaguaEntries.slice().sort((a,b)=>String(b.importedAt||'').localeCompare(String(a.importedAt||''))).slice(0,8)){
+    synthesized.push({type:'guagua',text:`导入《${g.bookName||bookById(g.bookId)?.title||'呱呱项目'}》${g.month||''} 月账`,createdAt:g.importedAt||`${g.month||'1970-01'}-01T12:00:00`});
+  }
+  return synthesized.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))).slice(0,8);
+}
+function activityIcon(type){return ({record:'◉',guagua:'呱',settlement:'¥',book:'＋',archive:'□',restore:'↺'})[type]||'·';}
+function renderRecentActivity(){
+  const root=$('#recentActivity');if(!root)return;const items=activityItems().slice(0,5);
+  root.innerHTML=items.length?items.map(x=>`<div class="activity-row"><span class="activity-icon">${activityIcon(x.type)}</span><div><strong>${escapeHtml(x.text||'工作记录')}</strong><small>${x.createdAt?new Date(x.createdAt).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}):''}</small></div></div>`).join(''):empty('还没有工作动态。');
+}
 function renderHome(){
   const td=dayTotals(), mt=monthTotals();
   $('#todayDuration').textContent=secToText(td.duration); $('#todayIncome').textContent=`今日应收 ${money(td.income)}`;
   $('#monthDuration').textContent=secToText(mt.duration); $('#monthIncome').textContent=money(mt.income); renderGoals(td,mt);
-  const active=state.data.books.filter(b=>b.status!=='finished').sort((a,b)=>latestBookTimestamp(b.id)-latestBookTimestamp(a.id));
+  const active=state.data.books.filter(b=>!b.archived&&b.status!=='finished').sort((a,b)=>Number(!!b.pinned)-Number(!!a.pinned)||latestBookTimestamp(b.id)-latestBookTimestamp(a.id));
   const activePreview=active.slice(0,4);
   $('#activeBooks').innerHTML=activePreview.length?activePreview.map(bookCard).join(''):empty('还没有正在做的书，先新建一本。');
   const rs=state.data.records.filter(r=>recordWorkDate(r)===todayWorkDate()).sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
-  $('#todayRecords').innerHTML=rs.length?rs.map(recordCard).join(''):empty('今天还没有记录。拍照识别或手动新增都可以开始。');
+  $('#todayRecords').innerHTML=rs.length?rs.map(recordCard).join(''):empty('今天还没有 AU 日记录。呱呱月账不会被硬塞进“今天”。');
   const undo=$('#undoLastImportBtn'),meta=state.data.meta?.lastImport;if(undo){const canUndo=!!meta&&(meta.createdRecordIds?.some(id=>state.data.records.some(r=>r.id===id))||meta.replacements?.length);undo.hidden=!canUndo;}
+  renderRecentActivity();
 }
 function renderLibraryFilters(){
-  const p=$('#bookPlatformFilter'),c=$('#bookClientFilter');if(!p||!c)return;
+  const p=$('#bookPlatformFilter'),c=$('#bookClientFilter'),src=$('#bookSourceFilter');if(!p||!c||!src)return;
   const platforms=uniqueSorted(state.data.books.map(b=>b.platform)),clients=uniqueSorted(state.data.books.map(b=>b.client));
   p.innerHTML=`<option value="all">全部平台</option>${platforms.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')}`;
   c.innerHTML=`<option value="all">全部甲方</option>${clients.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('')}`;
-  p.value=platforms.includes(state.platformFilter)?state.platformFilter:'all';c.value=clients.includes(state.clientFilter)?state.clientFilter:'all';state.platformFilter=p.value;state.clientFilter=c.value;
+  src.value=['all','au','guagua'].includes(state.sourceFilter)?state.sourceFilter:'all';
+  p.value=platforms.includes(state.platformFilter)?state.platformFilter:'all';c.value=clients.includes(state.clientFilter)?state.clientFilter:'all';state.platformFilter=p.value;state.clientFilter=c.value;state.sourceFilter=src.value;
   if($('#bookSort'))$('#bookSort').value=state.bookSort;if($('#bookSortDirection')){$('#bookSortDirection').textContent=state.bookSort==='default'?'默认':sortDirectionLabel(state.bookSortDir);$('#bookSortDirection').disabled=state.bookSort==='default';}
+  document.querySelectorAll('#bookFilters [data-filter]').forEach(b=>b.classList.toggle('active',b.dataset.filter===state.bookFilter));
 }
 function renderBooks(){
-  let list=state.data.books.filter(b=>(state.bookFilter==='all'||b.status===state.bookFilter)&&(state.platformFilter==='all'||b.platform===state.platformFilter)&&(state.clientFilter==='all'||b.client===state.clientFilter));
-  list=sortedBooks(list);$('#bookResultCount').textContent=`${list.length} 本 · ${state.bookSort==='default'?'默认顺序':$('#bookSort')?.selectedOptions?.[0]?.text||'已排序'}`;
-  $('#bookList').innerHTML=list.length?list.map(bookCard).join(''):empty('这个分类里还没有书籍项目。');
+  let list=state.data.books.filter(b=>{
+    if(state.bookFilter==='archived'){if(!b.archived)return false;}else{if(b.archived)return false;if(state.bookFilter!=='all'&&b.status!==state.bookFilter)return false;}
+    if(state.sourceFilter!=='all'&&b.source!==state.sourceFilter)return false;
+    if(state.platformFilter!=='all'&&b.platform!==state.platformFilter)return false;
+    if(state.clientFilter!=='all'&&b.client!==state.clientFilter)return false;
+    return true;
+  });
+  list=sortedBooks(list);$('#bookResultCount').textContent=`${list.length} 本 · ${state.bookSort==='default'?'置顶 / 最近活跃':$('#bookSort')?.selectedOptions?.[0]?.text||'已排序'}`;
+  $('#bookList').innerHTML=list.length?list.map(bookCard).join(''):empty(state.bookFilter==='archived'?'还没有归档项目。':'这个分类里还没有书籍项目。');
 }
 function renderSettlementFilters(){
   const p=$('#settlementPlatformFilter'),c=$('#settlementClientFilter');if(!p||!c)return;
@@ -417,7 +530,7 @@ function renderSettlementCenter(){
   }else{
     items.sort((a,b)=>compareValue(settlementSortValue(a,state.settlementSort),settlementSortValue(b,state.settlementSort),state.settlementSortDir)||a.book.title.localeCompare(b.book.title,'zh-CN'));
     $('#settlementListTitle').textContent=state.settlementStatusFilter==='outstanding'?'未结清书籍':'按书籍';$('#settlementListSub').textContent='直接看哪本书还没结，也可以按条件筛选';
-    $('#settlementList').innerHTML=items.length?items.map(({book,t})=>`<article class="settlement-book-card"><button type="button" data-open-book="${book.id}"><div class="book-title">《${escapeHtml(book.title)}》</div><div class="book-meta"><span>${escapeHtml(book.client||'未填写甲方')}</span><span>·</span><span>${escapeHtml(book.platform||'未填写平台')}</span><span class="settlement-status ${t.settlement}">${settlementLabel(t.settlement)}</span></div><div class="mini-finance"><span>应收 ${money(t.receivable)}</span><span>已收 ${money(t.received)}</span></div></button><div class="settlement-book-money"><span>未收</span><strong>${money(t.unreceived)}</strong><button type="button" data-add-settlement="${book.id}">记结算</button></div></article>`).join(''):empty('当前筛选条件下没有书籍。');
+    $('#settlementList').innerHTML=items.length?items.map(({book,t})=>`<article class="settlement-book-card"><button type="button" data-open-book="${book.id}"><div class="book-title">《${escapeHtml(book.title)}》</div><div class="book-meta"><span>${escapeHtml(book.client||'未填写甲方')}</span><span>·</span><span>${escapeHtml(book.platform||'未填写平台')}</span><span class="settlement-status ${t.settlement}">${settlementLabel(t.settlement)}</span></div><div class="mini-finance"><span>应收 ${money(t.receivable)}</span><span>已收 ${money(t.received)}</span></div></button><div class="settlement-book-money"><span>未收</span><strong>${money(t.unreceived)}</strong>${book.source==='guagua'?'<span class="auto-settled-label">月账已计入</span>':`<button type="button" data-add-settlement="${book.id}">记结算</button>`}</div></article>`).join(''):empty('当前筛选条件下没有书籍。');
   }
 }
 function renderYearOptions(){
@@ -428,40 +541,49 @@ function renderYearOptions(){
 function renderAnnualReport(){
   renderYearOptions();const d=annualReportData(state.annualYear),el=$('#annualReport');if(!el)return;$('#annualReportSub').textContent=`${d.year} 年全年工作概览`;
   const maxDur=Math.max(1,...d.monthMap.map(x=>x.duration));
-  el.innerHTML=`<div class="annual-kpis"><div><span>全年成品</span><strong>${secToText(d.duration)}</strong></div><div><span>全年应收</span><strong>${money(d.receivable)}</strong></div><div><span>全年到账</span><strong>${money(d.received)}</strong></div><div><span>年末未收</span><strong>${money(d.outstanding)}</strong></div><div><span>工作天数</span><strong>${d.workDays} 天</strong></div><div><span>日均成品</span><strong>${secToText(d.avgDay)}</strong></div><div><span>月均应收</span><strong>${money(d.avgMonth)}</strong></div><div><span>涉及已完结</span><strong>${d.finishedBooks} 本</strong></div></div><div class="annual-highlights"><div><span>最忙月份</span><strong>${d.busiest?`${d.busiest.month} 月 · ${secToText(d.busiest.duration)}`:'—'}</strong></div><div><span>收入最高月份</span><strong>${d.bestIncome?`${d.bestIncome.month} 月 · ${money(d.bestIncome.receivable)}`:'—'}</strong></div><div><span>合作收入最多甲方</span><strong>${d.topClient?`${escapeHtml(d.topClient[0])} · ${money(d.topClient[1])}`:'—'}</strong></div><div><span>投入最多的书</span><strong>${d.topBook?`《${escapeHtml(d.topBook.name)}》 · ${secToText(d.topBook.duration)}`:'—'}</strong></div></div><div class="month-bars">${d.monthMap.map(m=>`<div class="month-bar" title="${m.month}月 ${secToText(m.duration)}"><i style="height:${Math.max(3,m.duration/maxDur*100)}%"></i><span>${m.month}</span></div>`).join('')}</div>`;
+  el.innerHTML=`<div class="annual-kpis"><div><span>全年成品</span><strong>${secToText(d.duration)}</strong></div><div><span>全年应收</span><strong>${money(d.receivable)}</strong></div><div><span>全年到账</span><strong>${money(d.received)}</strong></div><div><span>年末未收</span><strong>${money(d.outstanding)}</strong></div><div><span>AU 有日记录天数</span><strong>${d.workDays} 天</strong></div><div><span>AU 日均成品</span><strong>${secToText(d.avgDay)}</strong></div><div><span>月均应收</span><strong>${money(d.avgMonth)}</strong></div><div><span>涉及已完结</span><strong>${d.finishedBooks} 本</strong></div></div><div class="annual-highlights"><div><span>最忙月份</span><strong>${d.busiest?`${d.busiest.month} 月 · ${secToText(d.busiest.duration)}`:'—'}</strong></div><div><span>收入最高月份</span><strong>${d.bestIncome?`${d.bestIncome.month} 月 · ${money(d.bestIncome.receivable)}`:'—'}</strong></div><div><span>合作收入最多甲方</span><strong>${d.topClient?`${escapeHtml(d.topClient[0])} · ${money(d.topClient[1])}`:'—'}</strong></div><div><span>投入最多的书</span><strong>${d.topBook?`《${escapeHtml(d.topBook.name)}》 · ${secToText(d.topBook.duration)}`:'—'}</strong></div></div><div class="month-bars">${d.monthMap.map(m=>`<div class="month-bar" title="${m.month}月 ${secToText(m.duration)}"><i style="height:${Math.max(3,m.duration/maxDur*100)}%"></i><span>${m.month}</span></div>`).join('')}</div>`;
 }
 function renderStats(){
   renderYearOptions();const td=dayTotals(),mt=monthTotals();$('#statsTodayDuration').textContent=secToText(td.duration);$('#statsTodayIncome').textContent=money(td.income);$('#statsMonthDuration').textContent=secToText(mt.duration);$('#statsMonthIncome').textContent=money(mt.income);
   $('#annualEntrySub').textContent=`查看 ${state.annualYear} 年全年工作概览`;if($('#statsDimension'))$('#statsDimension').value=state.statsDimension;$('#statsDimensionRange').textContent=`当前范围：${statsPeriodLabel()}`;
   const bounds=statsPeriodBounds(),root=$('#statsDimensionList');
   if(state.statsDimension==='book'){
-    const books=state.data.books.filter(b=>state.data.records.some(r=>r.bookId===b.id&&dateInBounds(recordWorkDate(r),bounds))||state.data.settlements.some(x=>x.bookId===b.id&&dateInBounds(x.date,bounds)));root.innerHTML=books.length?books.map(b=>statBookCard(b,bounds)).join(''):empty('这个统计范围里还没有按书数据。');
+    const books=state.data.books.filter(b=>state.data.records.some(r=>r.bookId===b.id&&dateInBounds(recordWorkDate(r),bounds))||state.data.settlements.some(x=>x.bookId===b.id&&dateInBounds(x.date,bounds))||state.data.guaguaEntries.some(g=>g.bookId===b.id&&guaguaEntryInBounds(g,bounds)));
+    root.innerHTML=books.length?books.sort((a,b)=>bookTotals(b.id).receivable-bookTotals(a.id).receivable).map(b=>statBookCard(b,bounds)).join(''):empty('这个统计范围里还没有按书数据。');
   }else{
-    const key=state.statsDimension==='client'?'client':'platform',groups=groupedPeriodStats(key);root.innerHTML=groups.length?groups.map(g=>groupStatCard(key,g)).join(''):empty(`这个统计范围里还没有${key==='client'?'甲方':'平台'}数据。`);
+    const key=state.statsDimension==='client'?'client':state.statsDimension==='platform'?'platform':'source',groups=groupedPeriodStats(key);root.innerHTML=groups.length?groups.map(g=>groupStatCard(key,g)).join(''):empty(`这个统计范围里还没有${key==='client'?'甲方':key==='platform'?'平台':'来源'}数据。`);
   }
 }
 function renderStatsHistory(){
   renderYearOptions();const pt=statsPeriodTotals();$('#statsPeriodSelect').value=state.statsPeriod;$('#statsPeriodLabel').textContent=statsPeriodLabel();$('#statsPeriodDuration').textContent=secToText(pt.duration);$('#statsPeriodReceivable').textContent=money(pt.receivable);$('#statsPeriodReceived').textContent=money(pt.received);$('#statsPeriodOutstanding').textContent=money(pt.outstanding);$('#statsPeriodRecords').textContent=`${pt.records} 条`;
   $('#statsYearWrap').hidden=state.statsPeriod!=='yearPick';$('#statsCustomMonthWrap').hidden=state.statsPeriod!=='customMonth';$('#statsCustomRangeWrap').hidden=state.statsPeriod!=='customRange';$('#statsCustomMonth').value=state.statsCustomMonth;$('#statsRangeStart').value=state.statsRangeStart;$('#statsRangeEnd').value=state.statsRangeEnd;
   const quick=$('#statsMonthQuick');const show=['year','yearPick'].includes(state.statsPeriod);quick.hidden=!show;if(show){const y=state.statsPeriod==='yearPick'?state.statsYear:Number(todayWorkDate().slice(0,4));quick.innerHTML=Array.from({length:12},(_,i)=>`<button type="button" data-quick-month="${y}-${String(i+1).padStart(2,'0')}">${i+1}月</button>`).join('');}
-  const bounds=statsPeriodBounds(),books=state.data.books.filter(b=>state.data.records.some(r=>r.bookId===b.id&&dateInBounds(recordWorkDate(r),bounds))||state.data.settlements.some(x=>x.bookId===b.id&&dateInBounds(x.date,bounds)));$('#historyBookList').innerHTML=books.length?books.map(b=>statBookCard(b,bounds)).join(''):empty('这个周期里还没有项目数据。');
+  const bounds=statsPeriodBounds(),books=state.data.books.filter(b=>state.data.records.some(r=>r.bookId===b.id&&dateInBounds(recordWorkDate(r),bounds))||state.data.settlements.some(x=>x.bookId===b.id&&dateInBounds(x.date,bounds))||state.data.guaguaEntries.some(g=>g.bookId===b.id&&guaguaEntryInBounds(g,bounds)));$('#historyBookList').innerHTML=books.length?books.map(b=>statBookCard(b,bounds)).join(''):empty('这个周期里还没有项目数据。');
 }
 function renderMetricDetail(){
   const type=state.metricDetail,root=$('#metricDetailContent');if(!root||!type)return;const td=dayTotals(),mt=monthTotals(),dailyGoal=(Number(state.workSettings.dailyGoalMinutes)||0)*60,monthGoal=(Number(state.workSettings.monthlyGoalHours)||0)*3600;
-  const todayRs=state.data.records.filter(r=>recordWorkDate(r)===todayWorkDate()),monthBounds=boundsForMonth(),monthRs=currentMonthRecords();let title='',hero='',body='';
+  const todayRs=state.data.records.filter(r=>recordWorkDate(r)===todayWorkDate()),monthBounds=boundsForMonth(),monthRs=currentMonthRecords(),monthGs=guaguaMonthEntries();let title='',hero='',body='';
   if(type==='todayGoal'||type==='todayDuration'||type==='todayIncome'){
-    title=type==='todayGoal'?'今日目标':type==='todayIncome'?'今日应收':'今日成品';const goal=type==='todayGoal'&&dailyGoal?`<div class="detail-progress"><div><span>目标</span><strong>${secToText(dailyGoal)}</strong></div><div class="goal-track"><i style="width:${clamp(td.duration/dailyGoal*100,0,100)}%"></i></div><small>${td.duration>=dailyGoal?'今天的目标已经完成':`还差 ${secToText(Math.max(0,dailyGoal-td.duration))}`}</small></div>`:'';hero=`<div class="metric-detail-hero"><span>${todayWorkDate()} 工作日</span><strong>${type==='todayIncome'?money(td.income):secToText(td.duration)}</strong><small>${todayRs.length} 条记录</small></div>${goal}`;body=`<section class="section-block"><div class="section-head"><div><h2>今天的记录</h2><p>凌晨 ${state.workSettings.cutoff||'06:00'} 前仍归前一天</p></div></div><div class="card-list">${todayRs.length?todayRs.sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||'')).map(recordCard).join(''):empty('今天还没有记录。')}</div></section>`;
+    title=type==='todayGoal'?'今日目标':type==='todayIncome'?'今日应收':'今日成品';const goal=type==='todayGoal'&&dailyGoal?`<div class="detail-progress"><div><span>目标</span><strong>${secToText(dailyGoal)}</strong></div><div class="goal-track"><i style="width:${clamp(td.duration/dailyGoal*100,0,100)}%"></i></div><small>${td.duration>=dailyGoal?'今天的目标已经完成':`还差 ${secToText(Math.max(0,dailyGoal-td.duration))}`}</small></div>`:'';hero=`<div class="metric-detail-hero"><span>${todayWorkDate()} 工作日 · AU 日记录</span><strong>${type==='todayIncome'?money(td.income):secToText(td.duration)}</strong><small>${todayRs.length} 条记录</small></div>${goal}`;body=`<section class="section-block"><div class="section-head"><div><h2>今天的记录</h2><p>凌晨 ${state.workSettings.cutoff||'06:00'} 前仍归前一天；呱呱月账不进入今日</p></div></div><div class="card-list">${todayRs.length?todayRs.sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||'')).map(recordCard).join(''):empty('今天还没有 AU 日记录。')}</div></section>`;
   }else{
-    title=type==='monthGoal'?'本月目标':type==='monthIncome'?'本月应收':'本月成品';const goal=type==='monthGoal'&&monthGoal?`<div class="detail-progress"><div><span>目标</span><strong>${secToText(monthGoal)}</strong></div><div class="goal-track"><i style="width:${clamp(mt.duration/monthGoal*100,0,100)}%"></i></div><small>${mt.duration>=monthGoal?'本月目标已经完成':`还差 ${secToText(Math.max(0,monthGoal-mt.duration))}`}</small></div>`:'';hero=`<div class="metric-detail-hero"><span>${currentYM()}</span><strong>${type==='monthIncome'?money(mt.income):secToText(mt.duration)}</strong><small>${monthRs.length} 条记录</small></div>${goal}`;body=`<section class="section-block"><div class="section-head"><div><h2>按书查看</h2><p>本月有工作记录的项目</p></div></div><div class="card-list">${monthRs.length?recordsByBookCards(monthRs,monthBounds):empty('本月还没有记录。')}</div></section>`;
+    const allBookIds=[...new Set([...monthRs.map(r=>r.bookId),...monthGs.map(g=>g.bookId)])],books=allBookIds.map(bookById).filter(Boolean).sort((a,b)=>bookTotals(b.id).receivable-bookTotals(a.id).receivable);
+    title=type==='monthGoal'?'本月目标':type==='monthIncome'?'本月应收':'本月成品';const goal=type==='monthGoal'&&monthGoal?`<div class="detail-progress"><div><span>目标</span><strong>${secToText(monthGoal)}</strong></div><div class="goal-track"><i style="width:${clamp(mt.duration/monthGoal*100,0,100)}%"></i></div><small>${mt.duration>=monthGoal?'本月目标已经完成':`还差 ${secToText(Math.max(0,monthGoal-mt.duration))}`}</small></div>`:'';
+    const split=`<div class="source-split"><div><span>AU</span><strong>${type==='monthIncome'?money(mt.auIncome):secToText(mt.auDuration)}</strong><small>${mt.auRecords} 条日记录</small></div><div><span>呱呱</span><strong>${type==='monthIncome'?money(mt.guaguaIncome):secToText(mt.guaguaDuration)}</strong><small>${mt.guaguaRows} 条月账</small></div></div>`;
+    hero=`<div class="metric-detail-hero"><span>${currentYM()} · AU + 呱呱</span><strong>${type==='monthIncome'?money(mt.income):secToText(mt.duration)}</strong><small>${monthRs.length+monthGs.length} 条数据</small></div>${goal}${split}`;body=`<section class="section-block"><div class="section-head"><div><h2>按书查看</h2><p>AU 与呱呱各自独立，统计层汇总</p></div></div><div class="card-list">${books.length?books.map(b=>statBookCard(b,monthBounds)).join(''):empty('本月还没有记录。')}</div></section>`;
   }
   $('#metricDetailTitle').textContent=title;root.innerHTML=hero+body+(type==='todayGoal'||type==='monthGoal'?`<button class="secondary-wide metric-settings-jump" type="button" data-open-settings>调整工作目标</button>`:'');
 }
 function openMetricDetail(type,returnView=state.currentView){state.metricDetail=type;state.metricReturnView=returnView;switchView('metric-detail');renderMetricDetail();}
-function renderSettingsSummary(){const el=$('#settingsDataSummary');if(el)el.innerHTML=`<div class="settings-summary-grid"><div><span>书籍</span><strong>${state.data.books.length}</strong></div><div><span>录音记录</span><strong>${state.data.records.length}</strong></div><div><span>结算记录</span><strong>${state.data.settlements.length}</strong></div></div>`;}
+function renderSettingsSummary(){const el=$('#settingsDataSummary');if(el)el.innerHTML=`<div class="settings-summary-grid"><div><span>项目</span><strong>${state.data.books.length}</strong></div><div><span>AU 记录</span><strong>${state.data.records.length}</strong></div><div><span>呱呱月账</span><strong>${state.data.guaguaEntries.length}</strong></div><div><span>结算记录</span><strong>${state.data.settlements.length}</strong></div></div>`;}
+function renderSnapshots(){
+  const root=$('#snapshotList');if(!root)return;const list=readSnapshots();
+  root.innerHTML=list.length?list.map(s=>`<article class="snapshot-row"><div><strong>${escapeHtml(s.label||'数据快照')}</strong><small>${new Date(s.createdAt).toLocaleString('zh-CN')} · ${escapeHtml(s.reason||'snapshot')}</small></div><div><button type="button" data-export-snapshot="${s.id}">导出</button><button type="button" data-restore-snapshot="${s.id}">恢复</button></div></article>`).join(''):empty('还没有快照。0.9 首次升级会自动留一份升级前数据。');
+}
 function renderWorkSettings(){if($('#workdayCutoff'))$('#workdayCutoff').value=state.workSettings.cutoff||'06:00';if($('#dailyGoalMinutes'))$('#dailyGoalMinutes').value=state.workSettings.dailyGoalMinutes||'';if($('#monthlyGoalHours'))$('#monthlyGoalHours').value=state.workSettings.monthlyGoalHours||'';}
 function renderExportOptions(){const years=availableYears(),clients=uniqueSorted(state.data.books.map(b=>b.client)),books=state.data.books.slice().sort((a,b)=>a.title.localeCompare(b.title,'zh-CN'));if($('#csvYear'))$('#csvYear').innerHTML=years.map(y=>`<option value="${y}">${y}</option>`).join('');if($('#csvMonth')&&!$('#csvMonth').value)$('#csvMonth').value=currentYM();if($('#csvClient'))$('#csvClient').innerHTML=clients.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');if($('#csvBook'))$('#csvBook').innerHTML=books.map(b=>`<option value="${b.id}">《${escapeHtml(b.title)}》</option>`).join('');updateCsvScopeUI();}
 function renderChangelog(){
   const root=$('#changelogList');if(!root)return;const versions=[
+    {v:'0.9 Beta',tag:'多来源与质感升级',items:['新增呱呱录音宝月账导入：先选择归属月份，再由云端 OCR 识别官方工作量、单价、金额和结算信息。','AU 与呱呱保持项目独立；今日只统计 AU 日记录，本月、年度和总账可汇总并按来源拆分。','新增全局搜索、项目置顶、项目归档、呱呱月账重复检测和最近工作动态。','首次加入数据保险箱：升级前与导入备份前自动保留快照，可在设置中导出或恢复。','加入页面过渡与微交互动效，统一卡片、按钮和层级质感。']},
     {v:'0.8 Beta',tag:'信息架构重构',items:['首页从展示页升级为可点击仪表盘；目标、本月成品与应收均可进入明细。','底部导航收敛为首页、书库、拍照、结算、统计；设置移到右上角。','书库加入成品时长、累计应收、小时单价、建档时间排序与升降序。','统计拆成往期统计、年度报告二级页面；分类统计改为按书籍 / 甲方 / 平台切换。','结算支持按书籍 / 按甲方两种视角，以及平台、甲方、结算状态筛选和排序。','修复旧版凌晨数据迁移：符合条件的旧记录按 06:00 工作日规则重新归属。','设置新增从早期版本到当前版本的更新日志。']},
     {v:'0.7 Beta',tag:'工作流完善',items:['加入重复记录检测与冲突处理。','录音记录可编辑、删除、恢复，并可撤销上一批导入。','新增结算中心、长期时间统计、年度报告、工作目标与 06:00 自定义工作日。','JSON 备份继续保留，并加入可供 Excel / Numbers 打开的 CSV 流水导出。']},
     {v:'0.6 Beta',tag:'云端 OCR 定档',items:['拍照识别正式切到火山引擎 OCRNormal + Cloudflare Worker。','按文件名行与坐标配对书名、集数和时长，继续过滤返音 / 反音。','保留固定文件简称到正式书名的映射，并继续兼容旧数据。']},
@@ -475,95 +597,88 @@ function renderChangelog(){
   ];root.innerHTML=versions.map((x,i)=>`<details class="changelog-item" ${i===0?'open':''}><summary><div><strong>${x.v}</strong><span>${x.tag}</span></div><i>⌄</i></summary><ul>${x.items.map(y=>`<li>${escapeHtml(y)}</li>`).join('')}</ul></details>`).join('');
 }
 function bookCard(book){
-  const t=bookTotals(book.id);
-  return `<button class="book-card" type="button" data-open-book="${book.id}">
-    <div class="book-main"><div class="book-title">《${escapeHtml(book.title)}》</div>
-      <div class="book-meta"><span>${escapeHtml(book.alias)}</span><span>·</span><span>${t.currentProgress?`录至 ${t.currentProgress} 集`:'暂无进度'}</span><span class="pill ${book.status}">${statusText(book.status)}</span></div>
-      <div class="book-numbers"><div>累计成品<strong>${secToText(t.duration)}</strong></div><div>未收<strong>${money(t.unreceived)}</strong></div></div>
-    </div><span class="chev">›</span></button>`;
+  const t=bookTotals(book.id),source=sourceShort(book.source),sub=book.source==='guagua'?'月账项目':(t.currentProgress?`录至 ${t.currentProgress} 集`:'暂无进度');
+  return `<article class="book-card-wrap ${book.pinned?'is-pinned':''}"><button class="book-card" type="button" data-open-book="${book.id}">
+    <div class="book-main"><div class="book-title-row"><div class="book-title">《${escapeHtml(book.title)}》</div><span class="source-badge ${book.source}">${source}</span>${book.archived?'<span class="archive-badge">已归档</span>':''}</div>
+      <div class="book-meta"><span>${book.source==='guagua'?escapeHtml(book.client||'呱呱项目'):escapeHtml(book.alias)}</span><span>·</span><span>${sub}</span><span class="pill ${book.status}">${statusText(book.status)}</span></div>
+      <div class="book-numbers"><div>累计成品<strong>${secToText(t.duration)}</strong></div><div>${book.source==='guagua'?'累计收入':'未收'}<strong>${money(book.source==='guagua'?t.receivable:t.unreceived)}</strong></div></div>
+    </div><span class="chev">›</span></button><button class="pin-book-btn ${book.pinned?'active':''}" type="button" data-pin-book="${book.id}" aria-label="${book.pinned?'取消置顶':'置顶项目'}">${book.pinned?'★':'☆'}</button></article>`;
 }
 function recordCard(rec){
   const b=bookById(rec.bookId);
   return `<button class="record-card record-card-btn" type="button" data-edit-record="${rec.id}"><div><strong>${b?`《${escapeHtml(b.title)}》`:'未匹配项目'}</strong><div class="small">${rec.episodeStart}-${rec.episodeEnd} 集 · ${recordWorkDate(rec)}</div></div><div class="record-duration">${secToClock(rec.durationSec)}</div></button>`;
 }
 function statBookCard(book,bounds=null){
-  if(!bounds){const t=bookTotals(book.id);return `<button class="stat-book-card" type="button" data-open-book="${book.id}"><div class="book-title">《${escapeHtml(book.title)}》</div><div class="book-meta"><span>${secToText(t.duration)}</span><span>·</span><span>录至 ${t.currentProgress||'-'} 集</span><span class="settlement-status ${t.settlement}">${settlementLabel(t.settlement)}</span></div><div class="money-row"><div><span>应收</span><strong>${money(t.receivable)}</strong></div><div><span>已收</span><strong>${money(t.received)}</strong></div><div><span>未收</span><strong>${money(t.unreceived)}</strong></div></div></button>`;}
+  if(!bounds){const t=bookTotals(book.id);return `<button class="stat-book-card" type="button" data-open-book="${book.id}"><div class="book-title-row"><div class="book-title">《${escapeHtml(book.title)}》</div><span class="source-badge ${book.source}">${sourceShort(book.source)}</span></div><div class="book-meta"><span>${secToText(t.duration)}</span><span>·</span><span>${book.source==='guagua'?'月账项目':`录至 ${t.currentProgress||'-'} 集`}</span><span class="settlement-status ${t.settlement}">${settlementLabel(t.settlement)}</span></div><div class="money-row"><div><span>应收</span><strong>${money(t.receivable)}</strong></div><div><span>已收</span><strong>${money(t.received)}</strong></div><div><span>未收</span><strong>${money(t.unreceived)}</strong></div></div></button>`;}
   const rs=state.data.records.filter(r=>r.bookId===book.id&&dateInBounds(recordWorkDate(r),bounds));
   const ss=state.data.settlements.filter(x=>x.bookId===book.id&&dateInBounds(x.date,bounds));
-  const duration=rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0),receivable=rs.reduce((a,r)=>a+recordAmount(r),0),received=ss.reduce((a,x)=>a+(Number(x.amount)||0),0);
+  const gs=state.data.guaguaEntries.filter(g=>g.bookId===book.id&&guaguaEntryInBounds(g,bounds));
+  const guaAmount=gs.reduce((a,g)=>a+guaguaEntryAmount(g),0),duration=rs.reduce((a,r)=>a+(Number(r.durationSec)||0),0)+gs.reduce((a,g)=>a+guaguaEntryDuration(g),0),receivable=rs.reduce((a,r)=>a+recordAmount(r),0)+guaAmount,received=ss.reduce((a,x)=>a+(Number(x.amount)||0),0)+guaAmount;
   const total=bookTotals(book.id);
-  return `<button class="stat-book-card" type="button" data-open-book="${book.id}"><div class="book-title">《${escapeHtml(book.title)}》</div><div class="book-meta"><span>${secToText(duration)}</span><span>·</span><span>录至 ${total.currentProgress||'-'} 集</span><span class="settlement-status ${total.settlement}">${settlementLabel(total.settlement)}</span></div><div class="money-row"><div><span>周期应收</span><strong>${money(receivable)}</strong></div><div><span>周期到账</span><strong>${money(received)}</strong></div><div><span>当前未收</span><strong>${money(total.unreceived)}</strong></div></div></button>`;
+  return `<button class="stat-book-card" type="button" data-open-book="${book.id}"><div class="book-title-row"><div class="book-title">《${escapeHtml(book.title)}》</div><span class="source-badge ${book.source}">${sourceShort(book.source)}</span></div><div class="book-meta"><span>${secToText(duration)}</span><span>·</span><span>${book.source==='guagua'?'月账项目':`录至 ${total.currentProgress||'-'} 集`}</span><span class="settlement-status ${total.settlement}">${settlementLabel(total.settlement)}</span></div><div class="money-row"><div><span>周期应收</span><strong>${money(receivable)}</strong></div><div><span>周期到账</span><strong>${money(received)}</strong></div><div><span>当前未收</span><strong>${money(total.unreceived)}</strong></div></div></button>`;
 }
 function groupStatCard(type,g){
-  const label=type==='platform'?'平台':'甲方';
-  return `<button class="group-stat-card" type="button" data-group-type="${type}" data-group-name="${escapeHtml(g.name)}">
+  const label=type==='platform'?'平台':type==='client'?'甲方':'来源';
+  const attrs=type==='source'?`data-source-group="${g.name==='呱呱录音宝'?'guagua':'au'}"`:`data-group-type="${type}" data-group-name="${escapeHtml(g.name)}"`;
+  return `<button class="group-stat-card" type="button" ${attrs}>
     <div><span class="group-label">${label}</span><strong>${escapeHtml(g.name)}</strong><small>${secToText(g.duration)}</small></div>
     <div class="group-money"><span>应收 ${money(g.receivable)}</span><span>到账 ${money(g.received)}</span></div><span class="chev">›</span>
   </button>`;
 }
 function empty(text){return `<div class="empty-card">${escapeHtml(text)}</div>`;}
 
-function switchView(view){
+function switchView(view,direction='forward'){
   if(view!==state.currentView)state.previousView=state.currentView;
-  state.currentView=view;
-  document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id===`view-${view}`));
-  document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active',el.dataset.view===view));
-  window.scrollTo({top:0,behavior:'instant'});
-  if(view==='stats-history')renderStatsHistory();if(view==='stats-annual')renderAnnualReport();if(view==='metric-detail')renderMetricDetail();if(view==='settings'){renderWorkSettings();renderCloudOcrSettings();renderChangelog();}
+  const apply=()=>{
+    state.currentView=view;
+    document.documentElement.dataset.navDirection=direction;
+    document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id===`view-${view}`));
+    document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active',el.dataset.view===view));
+    window.scrollTo({top:0,behavior:'instant'});
+    if(view==='stats-history')renderStatsHistory();if(view==='stats-annual')renderAnnualReport();if(view==='metric-detail')renderMetricDetail();if(view==='guagua-import')renderGuaguaImportState();if(view==='settings'){renderWorkSettings();renderCloudOcrSettings();renderSnapshots();renderChangelog();}
+  };
+  const reduced=window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+  if(document.startViewTransition&&!reduced){document.startViewTransition(apply);}else apply();
 }
 function openModal(id){ const el=$(`#${id}`); el.classList.add('open'); el.setAttribute('aria-hidden','false'); document.body.style.overflow='hidden'; }
 function closeModal(id){ const el=$(`#${id}`); el.classList.remove('open'); el.setAttribute('aria-hidden','true'); document.body.style.overflow=''; }
 function toast(msg){ const el=$('#toast'); el.textContent=msg; el.classList.add('show'); clearTimeout(toast._t); toast._t=setTimeout(()=>el.classList.remove('show'),2400); }
 
+function updateBookSourceUI(){
+  const source=$('#bookSource')?.value||'au',label=$('#bookAliasLabel');if(!label)return;
+  label.firstChild.textContent=source==='guagua'?'项目简称（可不填）':'文件简称（AU 必填）';
+  $('#bookAlias').placeholder=source==='guagua'?'不填时自动使用正式书名':'例如：双修';
+}
 function openBookForm(book=null){
   $('#bookModalTitle').textContent=book?'编辑书籍':'新建书籍';
-  $('#bookId').value=book?.id||''; $('#bookTitle').value=book?.title||''; $('#bookAlias').value=book?.alias||'';
+  $('#bookId').value=book?.id||'';$('#bookSource').value=book?.source||'au';$('#bookSource').disabled=!!book;
+  $('#bookTitle').value=book?.title||''; $('#bookAlias').value=book?.alias||'';
   $('#bookClient').value=book?.client||''; $('#bookPlatform').value=book?.platform||''; $('#bookRoleType').value=book?.roleType||'';
   $('#bookRoleName').value=book?.roleName||''; $('#bookRate').value=book?.rate??''; $('#bookStatus').value=book?.status||'ongoing';
-  openModal('bookModal');
+  updateBookSourceUI();openModal('bookModal');
 }
 $('#bookForm').addEventListener('submit',e=>{
   e.preventDefault();
-  const id=$('#bookId').value; const alias=$('#bookAlias').value.trim();
-  const duplicate=state.data.books.find(b=>normalizeAlias(b.alias)===normalizeAlias(alias)&&b.id!==id);
-  if(duplicate){toast('这个文件简称已经被其他书使用');return;}
-  const payload={title:$('#bookTitle').value.trim(),alias,client:$('#bookClient').value.trim(),platform:$('#bookPlatform').value,roleType:$('#bookRoleType').value,roleName:$('#bookRoleName').value.trim(),rate:Number($('#bookRate').value||0),status:$('#bookStatus').value};
-  if(id){Object.assign(bookById(id),payload);}else{state.data.books.push({id:uid('book'),...payload,createdAt:new Date().toISOString()});}
-  saveData(); refreshDraftBookMatches(); renderOcrDrafts(); closeModal('bookModal'); toast(id?'项目已更新':'项目已建立，可立即在识别结果里选择');
+  const id=$('#bookId').value,source=$('#bookSource').value||'au',title=$('#bookTitle').value.trim();let alias=$('#bookAlias').value.trim();if(source==='guagua'&&!alias)alias=title;
+  if(!title){toast('请填写正式书名');return;}if(source==='au'&&!alias){toast('AU 项目需要文件简称');return;}
+  const duplicate=source==='au'?state.data.books.find(b=>b.source==='au'&&normalizeAlias(b.alias)===normalizeAlias(alias)&&b.id!==id):null;
+  if(duplicate){toast('这个 AU 文件简称已经被其他书使用');return;}
+  const payload={source,title,alias,client:$('#bookClient').value.trim(),platform:$('#bookPlatform').value,roleType:$('#bookRoleType').value,roleName:$('#bookRoleName').value.trim(),rate:Number($('#bookRate').value||0),status:$('#bookStatus').value};
+  if(id){Object.assign(bookById(id),payload);logActivity('book',`更新《${title}》项目资料`,{bookId:id});}else{const b={id:uid('book'),...payload,pinned:false,archived:false,createdAt:new Date().toISOString()};state.data.books.push(b);logActivity('book',`新建《${title}》${sourceShort(source)}项目`,{bookId:b.id});}
+  saveData(); refreshDraftBookMatches(); renderOcrDrafts(); closeModal('bookModal'); toast(id?'项目已更新':'项目已建立');
 });
-
 function renderBookDetail(id){
   const b=bookById(id); if(!b)return;
-  state.selectedDetailBookId=id; const t=bookTotals(id), rs=recordsForBook(id), ss=settlementsForBook(id);
+  state.selectedDetailBookId=id; const t=bookTotals(id), rs=recordsForBook(id), ss=settlementsForBook(id),gs=guaguaEntriesForBook(id);
   const trash=state.data.trashRecords.filter(x=>x.record?.bookId===id).sort((a,b)=>String(b.deletedAt||'').localeCompare(String(a.deletedAt||'')));
-  $('#detailAlias').textContent=`文件简称：${b.alias}`; $('#detailTitle').textContent=`《${b.title}》`;
-  $('#bookDetailContent').innerHTML=`
-    <div class="detail-hero">
-      <div class="status-line"><span class="pill ${b.status}">${statusText(b.status)}</span><span class="settlement-status ${t.settlement}">${settlementLabel(t.settlement)}</span></div>
-      <div class="detail-grid">
-        <div class="detail-metric"><span>当前进度</span><strong>${t.currentProgress?`${t.currentProgress} 集`:'—'}</strong></div>
-        <div class="detail-metric"><span>累计成品</span><strong>${secToText(t.duration)}</strong></div>
-        <div class="detail-metric"><span>累计应收</span><strong>${money(t.receivable)}</strong></div>
-        <div class="detail-metric"><span>累计已收</span><strong>${money(t.received)}</strong></div>
-        <div class="detail-metric"><span>当前未收</span><strong>${money(t.unreceived)}</strong></div>
-        <div class="detail-metric"><span>已结算至</span><strong>${t.settledTo?`${t.settledTo} 集`:'—'}</strong></div>
-      </div>
-    </div>
-    <div class="detail-actions"><button class="light" type="button" data-add-settlement="${b.id}">＋ 记一笔结算</button><button class="ghost" type="button" data-edit-book="${b.id}">编辑项目</button></div>
-    <section class="section-block"><div class="section-head"><div><h2>项目资料</h2></div></div>
-      <div class="info-list">
-        ${infoRow('甲方',b.client||'—')}${infoRow('平台',b.platform||'—')}${infoRow('角色类型',b.roleType||'—')}${infoRow('角色名',b.roleName||'—')}${infoRow('成品小时单价',money(b.rate||0))}
-      </div>
-    </section>
-    <section class="section-block"><div class="section-head"><div><h2>录音记录</h2><p>${rs.length} 条 · 可修改或删除</p></div></div>
-      <div class="history-list">${rs.length?rs.map(r=>`<button class="history-row history-row-btn" type="button" data-edit-record="${r.id}"><div><strong>${r.episodeStart}-${r.episodeEnd} 集</strong><div class="muted">工作日 ${recordWorkDate(r)}</div></div><div class="history-right"><strong>${secToClock(r.durationSec)}</strong><span>编辑 ›</span></div></button>`).join(''):empty('还没有录音记录。')}</div>
-    </section>
-    <section class="section-block"><div class="section-head"><div><h2>结算记录</h2><p>${ss.length} 笔</p></div></div>
-      <div class="history-list">${ss.length?ss.map(s=>`<div class="history-row"><div><strong>结算至 ${s.settlementTo} 集</strong><div class="muted">${s.date}</div></div><strong>${money(s.amount)}</strong></div>`).join(''):empty('还没有结算记录。')}</div>
-    </section>
-    <section class="section-block"><div class="section-head"><div><h2>最近删除</h2><p>${trash.length} 条，可恢复</p></div></div>
-      <div class="history-list">${trash.length?trash.slice(0,20).map(x=>`<div class="history-row"><div><strong>${x.record.episodeStart}-${x.record.episodeEnd} 集 · ${secToClock(x.record.durationSec)}</strong><div class="muted">删除于 ${String(x.deletedAt||'').replace('T',' ').slice(0,16)}</div></div><button class="restore-btn" type="button" data-restore-record="${x.id}">恢复</button></div>`).join(''):empty('没有已删除记录。')}</div>
-    </section>`;
+  $('#detailAlias').textContent=b.source==='guagua'?`工作来源：呱呱录音宝`:`工作来源：AU · 文件简称：${b.alias}`; $('#detailTitle').textContent=`《${b.title}》`;
+  const primaryMetric=b.source==='guagua'?`<div class="detail-metric"><span>月账条数</span><strong>${gs.length} 条</strong></div>`:`<div class="detail-metric"><span>当前进度</span><strong>${t.currentProgress?`${t.currentProgress} 集`:'—'}</strong></div>`;
+  const extraMetric=b.source==='guagua'?`<div class="detail-metric"><span>最近账期</span><strong>${gs[0]?.month||'—'}</strong></div>`:`<div class="detail-metric"><span>已结算至</span><strong>${t.settledTo?`${t.settledTo} 集`:'—'}</strong></div>`;
+  const actions=`<div class="detail-actions">${b.source==='au'?`<button class="light" type="button" data-add-settlement="${b.id}">＋ 记一笔结算</button>`:''}<button class="ghost" type="button" data-edit-book="${b.id}">编辑项目</button><button class="ghost" type="button" data-pin-book="${b.id}">${b.pinned?'取消置顶':'置顶项目'}</button><button class="ghost" type="button" data-archive-book="${b.id}">${b.archived?'移出归档':'归档项目'}</button></div>`;
+  const sourceHistory=b.source==='guagua'?`<section class="section-block"><div class="section-head"><div><h2>呱呱月账</h2><p>${gs.length} 条 · 官方金额直接入账</p></div></div><div class="history-list">${gs.length?gs.map(g=>`<div class="history-row guagua-history"><div><strong>${escapeHtml(g.month||'')} · ${escapeHtml(g.bookName||b.title)}</strong><div class="muted">工作量 ${Number(g.workloadHours||0).toFixed(2)}h · 单价 ${money(g.rate||0)} · ${escapeHtml(g.settlementMethod||'')}</div><div class="muted">${escapeHtml(g.settlementRange||'')} ${g.settlementDate?`· ${escapeHtml(g.settlementDate)}`:''}</div></div><div class="history-right"><strong>${money(g.amount)}</strong><span>${secToText(guaguaEntryDuration(g))}</span></div></div>`).join(''):empty('还没有呱呱月账。')}</div></section>`:`<section class="section-block"><div class="section-head"><div><h2>录音记录</h2><p>${rs.length} 条 · 可修改或删除</p></div></div><div class="history-list">${rs.length?rs.map(r=>`<button class="history-row history-row-btn" type="button" data-edit-record="${r.id}"><div><strong>${r.episodeStart}-${r.episodeEnd} 集</strong><div class="muted">工作日 ${recordWorkDate(r)}</div></div><div class="history-right"><strong>${secToClock(r.durationSec)}</strong><span>编辑 ›</span></div></button>`).join(''):empty('还没有录音记录。')}</div></section>`;
+  const settlementHistory=b.source==='au'?`<section class="section-block"><div class="section-head"><div><h2>结算记录</h2><p>${ss.length} 笔</p></div></div><div class="history-list">${ss.length?ss.map(s=>`<div class="history-row"><div><strong>结算至 ${s.settlementTo} 集</strong><div class="muted">${s.date}</div></div><strong>${money(s.amount)}</strong></div>`).join(''):empty('还没有结算记录。')}</div></section>`:'';
+  const trashHistory=b.source==='au'?`<section class="section-block"><div class="section-head"><div><h2>最近删除</h2><p>${trash.length} 条，可恢复</p></div></div><div class="history-list">${trash.length?trash.slice(0,20).map(x=>`<div class="history-row"><div><strong>${x.record.episodeStart}-${x.record.episodeEnd} 集 · ${secToClock(x.record.durationSec)}</strong><div class="muted">删除于 ${String(x.deletedAt||'').replace('T',' ').slice(0,16)}</div></div><button class="restore-btn" type="button" data-restore-record="${x.id}">恢复</button></div>`).join(''):empty('没有已删除记录。')}</div></section>`:'';
+  $('#bookDetailContent').innerHTML=`<div class="detail-hero"><div class="status-line"><span class="source-badge ${b.source}">${sourceShort(b.source)}</span><span class="pill ${b.status}">${statusText(b.status)}</span><span class="settlement-status ${t.settlement}">${settlementLabel(t.settlement)}</span>${b.archived?'<span class="archive-badge">已归档</span>':''}</div><div class="detail-grid">${primaryMetric}<div class="detail-metric"><span>累计成品</span><strong>${secToText(t.duration)}</strong></div><div class="detail-metric"><span>累计应收</span><strong>${money(t.receivable)}</strong></div><div class="detail-metric"><span>累计已收</span><strong>${money(t.received)}</strong></div><div class="detail-metric"><span>当前未收</span><strong>${money(t.unreceived)}</strong></div>${extraMetric}</div></div>${actions}<section class="section-block"><div class="section-head"><div><h2>项目资料</h2></div></div><div class="info-list">${infoRow('工作来源',sourceText(b.source))}${infoRow('甲方',b.client||'—')}${infoRow('平台',b.platform||'—')}${infoRow('角色类型',b.roleType||'—')}${infoRow('角色名',b.roleName||'—')}${infoRow('成品小时单价',money(b.rate||0))}</div></section>${sourceHistory}${settlementHistory}${trashHistory}`;
 }
 function infoRow(a,b){return `<div class="info-row"><span>${a}</span><strong>${escapeHtml(b)}</strong></div>`;}
 function openBookDetail(id){renderBookDetail(id);openModal('bookDetailModal');}
@@ -577,13 +692,14 @@ function openSettlement(bookId){
 $('#settlementForm').addEventListener('submit',e=>{
   e.preventDefault(); const bookId=$('#settlementBookId').value;
   state.data.settlements.push({id:uid('settle'),bookId,settlementTo:Number($('#settlementTo').value),amount:Number($('#settlementAmount').value),date:$('#settlementDate').value,createdAt:new Date().toISOString()});
+  logActivity('settlement',`《${bookById(bookId)?.title||'项目'}》记录结算 ${money($('#settlementAmount').value)}`,{bookId});
   saveData(); closeModal('settlementModal'); toast('结算已记下');
 });
 
 function openRecordEditor(recordId){
   const r=state.data.records.find(x=>x.id===recordId);if(!r)return;
   $('#recordId').value=r.id;
-  $('#recordBookId').innerHTML=state.data.books.map(b=>`<option value="${b.id}" ${b.id===r.bookId?'selected':''}>《${escapeHtml(b.title)}》 · ${escapeHtml(b.alias)}</option>`).join('');
+  $('#recordBookId').innerHTML=state.data.books.filter(b=>b.source!=='guagua').map(b=>`<option value="${b.id}" ${b.id===r.bookId?'selected':''}>《${escapeHtml(b.title)}》 · ${escapeHtml(b.alias)}</option>`).join('');
   $('#recordEpisodeStart').value=r.episodeStart||'';$('#recordEpisodeEnd').value=r.episodeEnd||'';$('#recordDuration').value=secToClock(r.durationSec);$('#recordWorkDate').value=recordWorkDate(r);
   openModal('recordModal');
 }
@@ -648,6 +764,7 @@ function fuzzyBookByAlias(alias){
   const n=normalizeAlias(alias); if(!n)return null;
   let best=null,second=null;
   for(const b of state.data.books){
+    if(b.source==='guagua')continue;
     const bn=normalizeAlias(b.alias); if(!bn)continue;
     if(n===bn || n.startsWith(bn) || bn.startsWith(n))return b;
     const dist=levenshtein(n,bn), maxLen=Math.max(n.length,bn.length), minLen=Math.min(n.length,bn.length);
@@ -669,7 +786,7 @@ function findBookByAlias(alias){return fuzzyBookByAlias(alias);}
 function findKnownAliasInText(text){
   const normalized=normalizeAlias(text);
   return [...state.data.books]
-    .filter(b=>b.alias)
+    .filter(b=>b.source!=='guagua'&&b.alias)
     .sort((a,b)=>normalizeAlias(b.alias).length-normalizeAlias(a.alias).length)
     .find(b=>normalized.includes(normalizeAlias(b.alias))) || null;
 }
@@ -837,7 +954,7 @@ function normalizeCloudDuration(v){
 function resolveCloudBook(rec){
   const exact=String(rec.matched_alias||'').trim();
   if(exact){
-    const b=state.data.books.find(x=>normalizeAlias(x.alias)===normalizeAlias(exact) || normalizeAlias(x.title)===normalizeAlias(exact));
+    const b=state.data.books.find(x=>x.source!=='guagua'&&(normalizeAlias(x.alias)===normalizeAlias(exact) || normalizeAlias(x.title)===normalizeAlias(exact)));
     if(b)return b;
   }
   const raw=String(rec.raw_alias||'').trim();
@@ -948,7 +1065,7 @@ function renderOcrDrafts(){
     return `<div class="ocr-row ${d.duplicateType==='exact'?'duplicate-row':''}" data-draft-id="${d.id}">
       <div class="ocr-row-top"><strong>记录 ${i+1}</strong><div>${badge} <button class="ocr-remove" data-remove-draft="${d.id}" type="button">×</button></div></div>
       <div class="ocr-fields">
-        <label>归入书籍<select data-field="bookId" data-id="${d.id}"><option value="">请选择书籍</option>${state.data.books.map(b=>`<option value="${b.id}" ${b.id===d.bookId?'selected':''}>《${escapeHtml(b.title)}》 · ${escapeHtml(b.alias)}</option>`).join('')}</select></label>
+        <label>归入书籍<select data-field="bookId" data-id="${d.id}"><option value="">请选择书籍</option>${state.data.books.filter(b=>b.source!=='guagua'&&!b.archived).map(b=>`<option value="${b.id}" ${b.id===d.bookId?'selected':''}>《${escapeHtml(b.title)}》 · ${escapeHtml(b.alias)}</option>`).join('')}</select></label>
         <label>文件简称<input data-field="alias" data-id="${d.id}" value="${escapeHtml(d.alias)}" placeholder="双修" /></label>
         <label>工作日期<input type="date" data-field="date" data-id="${d.id}" value="${d.date||todayWorkDate()}" /></label>
         <label>起始集<input type="number" inputmode="numeric" data-field="episodeStart" data-id="${d.id}" value="${d.episodeStart??''}" placeholder="394" /></label>
@@ -994,8 +1111,84 @@ function saveOcrDrafts(){
     const rec={id:uid('rec'),...payload};state.data.records.push(rec);createdRecordIds.push(rec.id);
   }
   state.data.meta.lastImport={batchId,createdAt:new Date().toISOString(),createdRecordIds,replacements};
+  logActivity('record',`AU 导入 ${candidates.length} 条录音记录`,{batchId,count:candidates.length});
   state.ocrDrafts=[];saveData();renderOcrDrafts();$('#ocrPreview').hidden=true;
   toast(`已保存 ${candidates.length} 条新记录${skipped?`，跳过 ${skipped} 条重复`:''}`);switchView('home');
+}
+
+function normalizeGuaguaBookName(s){return String(s||'').replace(/[《》]/g,'').replace(/\.{2,}|…+/g,'').replace(/\s+/g,'').trim().toLowerCase();}
+function findGuaguaBookByName(name){
+  const n=normalizeGuaguaBookName(name);if(!n)return null;
+  return state.data.books.find(b=>b.source==='guagua'&&(normalizeGuaguaBookName(b.title)===n||normalizeGuaguaBookName(b.alias)===n))||null;
+}
+function guaguaDuplicateKey(d){return [d.month,normalizeGuaguaBookName(d.sourceName),normalizeGuaguaBookName(d.bookName),Number(d.amount||0).toFixed(2),String(d.settlementRange||''),String(d.settlementDate||'')].join('|');}
+function guaguaDuplicateInfo(d){const key=guaguaDuplicateKey(d);const item=state.data.guaguaEntries.find(g=>guaguaDuplicateKey(g)===key);return item?{type:'exact',entry:item}:{type:'none',entry:null};}
+function guaguaMonthWarning(d){
+  const month=String(d.month||state.guaguaMonth||currentYM()),dateMonth=String(d.settlementDate||'').slice(0,7),rangeMonths=(String(d.settlementRange||'').match(/\d{4}-\d{2}/g)||[]);
+  const touches=dateMonth===month||rangeMonths.includes(month);if(!dateMonth&&!rangeMonths.length)return '未识别到结算日期';if(!touches)return '日期与所选月份不同';if(rangeMonths.length>=2&&rangeMonths[0]!==rangeMonths[rangeMonths.length-1])return '跨期结算';return '';
+}
+function renderGuaguaImportState(){
+  if($('#guaguaMonth')){$('#guaguaMonth').value=state.guaguaMonth||currentYM();}
+  renderGuaguaDrafts();
+}
+function setGuaguaProgress(pct,text){if($('#guaguaProgressPct'))$('#guaguaProgressPct').textContent=`${clamp(pct,0,100)}%`;if($('#guaguaProgressBar'))$('#guaguaProgressBar').style.width=`${clamp(pct,0,100)}%`;if(text&&$('#guaguaProgressText'))$('#guaguaProgressText').textContent=text;}
+async function callCloudGuagua(imageDataUrl){
+  const endpoint=cloudEndpoint();if(!endpoint)throw new Error('NO_ENDPOINT');
+  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),90000);
+  try{
+    const response=await fetch(`${endpoint}/ocr`,{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({mode:'guagua',image_data_url:imageDataUrl})});
+    let data={};try{data=await response.json();}catch(_){}
+    if(!response.ok)throw new Error(data?.error||`HTTP_${response.status}`);
+    if(!Array.isArray(data.statement_rows))throw new Error('WORKER_NEEDS_09');
+    return data;
+  }finally{clearTimeout(timer);}
+}
+function cloudGuaguaRowsToDrafts(rows,month){
+  const out=[];
+  for(const r of Array.isArray(rows)?rows:[]){
+    const bookName=String(r.book_name||'').trim(),sourceName=String(r.income_source||'').trim(),rate=Number(r.rate)||0,amount=Number(r.amount)||0,workloadHours=Number(r.workload_hours)||0;
+    if(!bookName&&!(amount>0))continue;
+    const matched=findGuaguaBookByName(bookName);
+    const d={id:uid('gdraft'),month,sourceName,bookName,workType:String(r.work_type||'').trim(),workloadHours:Number.isFinite(workloadHours)?workloadHours:0,rate:Number.isFinite(rate)?rate:0,amount:Number.isFinite(amount)?amount:0,settlementMethod:String(r.settlement_method||'').trim(),settlementRange:String(r.settlement_range||'').trim(),settlementDate:String(r.settlement_date||'').trim(),bookId:matched?.id||'',rawCells:r.raw_cells||[],confidence:String(r.confidence||'')};
+    d.duplicateType=guaguaDuplicateInfo(d).type;d.warning=guaguaMonthWarning(d);out.push(d);
+  }
+  return out;
+}
+async function processGuaguaImages(files){
+  if(!files?.length)return;if(!cloudEndpoint()){toast('先到“设置”填写云端视觉 OCR 地址');switchView('settings');return;}
+  state.guaguaMonth=$('#guaguaMonth')?.value||state.guaguaMonth||currentYM();$('#guaguaProgress').hidden=false;$('#guaguaPreview').hidden=true;setGuaguaProgress(3,'正在准备呱呱账单…');
+  try{
+    let drafts=[];
+    for(let i=0;i<files.length;i++){
+      setGuaguaProgress(10+Math.round(i/files.length*75),`第 ${i+1}/${files.length} 张：正在识别表格…`);
+      const dataUrl=await fileToDataUrl(files[i]),result=await callCloudGuagua(dataUrl);
+      drafts=drafts.concat(cloudGuaguaRowsToDrafts(result.statement_rows,state.guaguaMonth));
+    }
+    state.guaguaDrafts=drafts;renderGuaguaDrafts();$('#guaguaPreview').hidden=false;setGuaguaProgress(100,'识别完成');
+    if(!drafts.length)toast('没有识别到呱呱账单行，请换一张更清晰的照片');else toast(`识别到 ${drafts.length} 条呱呱月账`);
+  }catch(err){console.error(err);if(err?.message==='WORKER_NEEDS_09')toast('当前 Cloudflare Worker 还是旧版，需要先更新到 0.9 Worker');else if(err?.name==='AbortError')toast('呱呱账单识别超时，请重试');else toast(`呱呱账单识别失败：${String(err?.message||'请检查 OCR 服务')}`);}finally{$('#guaguaProgress').hidden=true;}
+}
+function renderGuaguaDrafts(){
+  const root=$('#guaguaRows');if(!root)return;const books=state.data.books.filter(b=>b.source==='guagua'&&!b.archived);
+  root.innerHTML=state.guaguaDrafts.map((d,i)=>{
+    d.month=state.guaguaMonth||d.month||currentYM();d.duplicateType=guaguaDuplicateInfo(d).type;d.warning=guaguaMonthWarning(d);
+    const badge=d.duplicateType==='exact'?'<span class="badge-duplicate">已导入 · 将自动跳过</span>':d.warning?`<span class="badge-warn">${escapeHtml(d.warning)}</span>`:'<span class="pill ongoing">信息完整</span>';
+    const approxSec=d.rate>0&&d.amount>=0?Math.round(d.amount/d.rate*3600):Math.round((d.workloadHours||0)*3600);
+    return `<article class="guagua-row ${d.duplicateType==='exact'?'duplicate-row':''}" data-guagua-id="${d.id}"><div class="ocr-row-top"><strong>账单 ${i+1}</strong><div>${badge}<button class="ocr-remove" type="button" data-remove-guagua="${d.id}">×</button></div></div><div class="guagua-row-title"><strong>${escapeHtml(d.bookName||'未识别书名')}</strong><span>${money(d.amount)}</span></div><div class="guagua-mini"><span>工作量 ${Number(d.workloadHours||0).toFixed(2)}h</span><span>单价 ${money(d.rate)}</span><span>有效时长约 ${secToText(approxSec)}</span></div><div class="ocr-fields guagua-fields"><label>归入呱呱项目<select data-guagua-field="bookId" data-id="${d.id}"><option value="">自动新建 / 自动匹配</option>${books.map(b=>`<option value="${b.id}" ${b.id===d.bookId?'selected':''}>《${escapeHtml(b.title)}》</option>`).join('')}</select></label><label>书籍名称<input data-guagua-field="bookName" data-id="${d.id}" value="${escapeHtml(d.bookName)}" /></label><label>收入来源 / 甲方<input data-guagua-field="sourceName" data-id="${d.id}" value="${escapeHtml(d.sourceName)}" /></label><label>工作量（小时）<input type="number" step="0.01" inputmode="decimal" data-guagua-field="workloadHours" data-id="${d.id}" value="${d.workloadHours||0}" /></label><label>单价<input type="number" step="0.01" inputmode="decimal" data-guagua-field="rate" data-id="${d.id}" value="${d.rate||0}" /></label><label>官方金额<input type="number" step="0.01" inputmode="decimal" data-guagua-field="amount" data-id="${d.id}" value="${d.amount||0}" /></label><label>结算方式<input data-guagua-field="settlementMethod" data-id="${d.id}" value="${escapeHtml(d.settlementMethod)}" /></label><label>结算范围<input data-guagua-field="settlementRange" data-id="${d.id}" value="${escapeHtml(d.settlementRange)}" /></label><label>结算日期<input data-guagua-field="settlementDate" data-id="${d.id}" value="${escapeHtml(d.settlementDate)}" /></label></div></article>`;
+  }).join('');
+  if($('#guaguaPreviewSub'))$('#guaguaPreviewSub').textContent=`归属 ${state.guaguaMonth} · ${state.guaguaDrafts.length} 条 · 官方金额不会用“工作量 × 单价”重算`;
+  const dup=state.guaguaDrafts.filter(d=>d.duplicateType==='exact').length;if($('#saveGuaguaBtn'))$('#saveGuaguaBtn').textContent=dup?`确认导入（跳过 ${dup} 条重复）`:'确认导入月账';
+}
+function syncGuaguaDraft(el){const d=state.guaguaDrafts.find(x=>x.id===el.dataset.id);if(!d)return;const field=el.dataset.guaguaField;d[field]=['workloadHours','rate','amount'].includes(field)?Number(el.value||0):el.value;if(field==='bookName'&&!d.bookId){const b=findGuaguaBookByName(d.bookName);if(b)d.bookId=b.id;}renderGuaguaDrafts();}
+function saveGuaguaDrafts(){
+  state.guaguaMonth=$('#guaguaMonth')?.value||state.guaguaMonth||currentYM();let saved=0,skipped=0;const batchId=uid('guagua_batch'),importedAt=new Date().toISOString();
+  for(const d of state.guaguaDrafts){d.month=state.guaguaMonth;d.duplicateType=guaguaDuplicateInfo(d).type;if(d.duplicateType==='exact'){skipped++;continue;}if(!d.bookName||!(Number(d.amount)>=0)||!(Number(d.rate)>=0)){toast('请检查书名、单价和官方金额');return;}}
+  for(const d of state.guaguaDrafts){if(d.duplicateType==='exact')continue;let b=d.bookId?bookById(d.bookId):findGuaguaBookByName(d.bookName);if(!b){b={id:uid('book'),source:'guagua',title:d.bookName,alias:d.bookName,client:d.sourceName||'',platform:'',roleType:'',roleName:'',rate:Number(d.rate)||0,status:'ongoing',pinned:false,archived:false,createdAt:importedAt};state.data.books.push(b);}else{if(!b.client&&d.sourceName)b.client=d.sourceName;if(!Number(b.rate)&&Number(d.rate))b.rate=Number(d.rate);}
+    const rate=Number(d.rate)||0,amount=Number(d.amount)||0,workloadHours=Number(d.workloadHours)||0,durationSec=rate>0&&amount>=0?Math.round(amount/rate*3600):Math.round(workloadHours*3600);
+    state.data.guaguaEntries.push({id:uid('gua'),batchId,bookId:b.id,month:state.guaguaMonth,sourceName:d.sourceName,bookName:d.bookName,workType:d.workType||'',workloadHours,rate,amount,settlementMethod:d.settlementMethod,settlementRange:d.settlementRange,settlementDate:d.settlementDate,durationSec,durationBasis:rate>0?'official_amount_div_rate':'displayed_workload',importedAt});saved++;
+  }
+  if(saved)logActivity('guagua',`导入 ${state.guaguaMonth} 呱呱月账 · ${saved} 条`,{batchId,month:state.guaguaMonth,count:saved});
+  state.guaguaDrafts=[];saveData();renderGuaguaDrafts();$('#guaguaPreview').hidden=true;toast(`已导入 ${saved} 条呱呱月账${skipped?`，跳过 ${skipped} 条重复`:''}`);switchView('home');
 }
 function renderCloudOcrSettings(){
   const input=$('#cloudOcrEndpoint'),status=$('#cloudOcrStatus'); if(!input||!status)return;
@@ -1028,7 +1221,7 @@ function saveWorkSettingsFromUI(){
 }
 function downloadBlob(blob,filename){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function exportBackup(){
-  const payload={app:'VoiceLedger',version:'0.8-beta',exportedAt:new Date().toISOString(),workSettings:state.workSettings,data:state.data};
+  const payload={app:'VoiceLedger',version:APP_VERSION,exportedAt:new Date().toISOString(),workSettings:state.workSettings,data:state.data};
   downloadBlob(new Blob([JSON.stringify(payload,null,2)],{type:'application/json;charset=utf-8'}),`VoiceLedger-backup-${todayISO()}.json`); toast('JSON 备份已导出');
 }
 async function importBackupFile(file){
@@ -1041,6 +1234,7 @@ async function importBackupFile(file){
 备份里有 ${data.books.length} 本书、${data.records.length} 条录音记录、${data.settlements.length} 条结算记录。
 
 继续吗？`))return;
+    createSnapshot(state.data,'导入备份前快照','before-import');
     if(raw?.workSettings){state.workSettings={...state.workSettings,...raw.workSettings};saveWorkSettings();}
     state.data=normalizeDataShape(data);localStorage.setItem(STORAGE_KEY,JSON.stringify(state.data));refreshDraftBookMatches();renderOcrDrafts();renderAll();toast('备份已导入');
   }catch(err){console.error(err);toast('这个文件不是有效的声账备份');}
@@ -1049,37 +1243,70 @@ function updateCsvScopeUI(){
   const scope=$('#csvScope')?.value||'all';
   for(const [id,type] of [['csvYearWrap','year'],['csvMonthWrap','month'],['csvClientWrap','client'],['csvBookWrap','book']]){const el=$(`#${id}`);if(el)el.hidden=scope!==type;}
 }
-function csvRecordsForScope(){
-  const scope=$('#csvScope')?.value||'all'; let rs=state.data.records.slice();
-  if(scope==='year'){const y=String($('#csvYear').value);rs=rs.filter(r=>recordWorkDate(r).startsWith(y));}
-  if(scope==='month'){const ym=$('#csvMonth').value;rs=rs.filter(r=>recordWorkDate(r).startsWith(ym));}
-  if(scope==='client'){const client=$('#csvClient').value;const ids=new Set(state.data.books.filter(b=>b.client===client).map(b=>b.id));rs=rs.filter(r=>ids.has(r.bookId));}
-  if(scope==='book'){const id=$('#csvBook').value;rs=rs.filter(r=>r.bookId===id);}
-  return rs.sort((a,b)=>recordWorkDate(a).localeCompare(recordWorkDate(b))||(a.createdAt||'').localeCompare(b.createdAt||''));
+function csvLedgerForScope(){
+  const scope=$('#csvScope')?.value||'all';let au=state.data.records.slice(),gua=state.data.guaguaEntries.slice();
+  if(scope==='year'){const y=String($('#csvYear').value);au=au.filter(r=>recordWorkDate(r).startsWith(y));gua=gua.filter(g=>String(g.month||'').startsWith(y));}
+  if(scope==='month'){const ym=$('#csvMonth').value;au=au.filter(r=>recordWorkDate(r).startsWith(ym));gua=gua.filter(g=>String(g.month||'')===ym);}
+  if(scope==='client'){const client=$('#csvClient').value;const ids=new Set(state.data.books.filter(b=>b.client===client).map(b=>b.id));au=au.filter(r=>ids.has(r.bookId));gua=gua.filter(g=>ids.has(g.bookId));}
+  if(scope==='book'){const id=$('#csvBook').value;au=au.filter(r=>r.bookId===id);gua=gua.filter(g=>g.bookId===id);}
+  return {au:au.sort((a,b)=>recordWorkDate(a).localeCompare(recordWorkDate(b))||(a.createdAt||'').localeCompare(b.createdAt||'')),gua:gua.sort((a,b)=>String(a.month||'').localeCompare(String(b.month||'')))};
 }
 function csvEscape(v){const s=String(v??'');return /[",\n]/.test(s)?`"${s.replace(/"/g,'""')}"`:s;}
 function exportCsv(){
-  const rs=csvRecordsForScope();if(!rs.length){toast('这个范围没有可导出的录音记录');return;}
-  const headers=['工作日期','实际记录时间','书名','文件简称','甲方','平台','起始集','结束集','成品时长','小时单价','应收金额','当前结算状态','已结算至'];
-  const rows=rs.map(r=>{const b=bookById(r.bookId),t=b?bookTotals(b.id):{settlement:'',settledTo:''};return [recordWorkDate(r),r.sourceTimestamp||r.createdAt||'',b?.title||'',b?.alias||'',b?.client||'',b?.platform||'',r.episodeStart,r.episodeEnd,secToClock(r.durationSec),Number(Number.isFinite(Number(r.rateSnapshot))?r.rateSnapshot:(b?.rate||0)).toFixed(2),recordAmount(r).toFixed(2),settlementLabel(t.settlement),t.settledTo||''];});
+  const {au,gua}=csvLedgerForScope();if(!au.length&&!gua.length){toast('这个范围没有可导出的流水');return;}
+  const headers=['工作来源','工作日期 / 账期','实际记录 / 导入时间','书名','文件简称','甲方','平台','起始集','结束集','成品 / 有效时长','小时单价','应收 / 官方金额','结算方式','结算范围','结算日期'];
+  const rows=[];
+  for(const r of au){const b=bookById(r.bookId);rows.push(['AU',recordWorkDate(r),r.sourceTimestamp||r.createdAt||'',b?.title||'',b?.alias||'',b?.client||'',b?.platform||'',r.episodeStart,r.episodeEnd,secToClock(r.durationSec),Number(Number.isFinite(Number(r.rateSnapshot))?r.rateSnapshot:(b?.rate||0)).toFixed(2),recordAmount(r).toFixed(2),'','','']);}
+  for(const g of gua){const b=bookById(g.bookId);rows.push(['呱呱',g.month||'',g.importedAt||'',b?.title||g.bookName||'',b?.alias||'',b?.client||g.sourceName||'',b?.platform||'','', '',secToClock(guaguaEntryDuration(g)),Number(g.rate||0).toFixed(2),Number(g.amount||0).toFixed(2),g.settlementMethod||'',g.settlementRange||'',g.settlementDate||'']);}
   const text='\uFEFF'+[headers,...rows].map(row=>row.map(csvEscape).join(',')).join('\r\n');
-  const scope=$('#csvScope')?.value||'all';downloadBlob(new Blob([text],{type:'text/csv;charset=utf-8'}),`VoiceLedger-${scope}-${todayISO()}.csv`);toast(`已导出 ${rs.length} 条 CSV 流水`);
+  const scope=$('#csvScope')?.value||'all';downloadBlob(new Blob([text],{type:'text/csv;charset=utf-8'}),`VoiceLedger-${scope}-${todayISO()}.csv`);toast(`已导出 ${rows.length} 条 CSV 流水`);
 }
-// Events — 0.8 信息架构
+function exportSnapshot(id){const snap=readSnapshots().find(x=>x.id===id);if(!snap)return;downloadBlob(new Blob([JSON.stringify(snap.payload,null,2)],{type:'application/json;charset=utf-8'}),`VoiceLedger-snapshot-${String(snap.createdAt||todayISO()).slice(0,10)}.json`);toast('快照已导出');}
+function restoreSnapshot(id){
+  const snap=readSnapshots().find(x=>x.id===id);if(!snap?.payload?.data)return;if(!confirm(`恢复“${snap.label}”？\n\n当前数据会先自动再留一份快照。`))return;
+  createSnapshot(state.data,'恢复快照前的当前数据','before-restore');
+  if(snap.payload.workSettings){state.workSettings={...state.workSettings,...snap.payload.workSettings};saveWorkSettings();}
+  state.data=normalizeDataShape(JSON.parse(JSON.stringify(snap.payload.data)));localStorage.setItem(STORAGE_KEY,JSON.stringify(state.data));renderAll();toast('快照已恢复');
+}
+function togglePinBook(id){const b=bookById(id);if(!b)return;b.pinned=!b.pinned;logActivity('book',`${b.pinned?'置顶':'取消置顶'}《${b.title}》`,{bookId:id});saveData();}
+function toggleArchiveBook(id){const b=bookById(id);if(!b)return;b.archived=!b.archived;b.archivedAt=b.archived?new Date().toISOString():null;logActivity('archive',`${b.archived?'归档':'移出归档'}《${b.title}》`,{bookId:id});saveData();toast(b.archived?'项目已归档':'项目已移出归档');}
+function searchHaystack(book){return [book.title,book.alias,book.client,book.platform,sourceText(book.source)].join(' ').toLowerCase();}
+function renderGlobalSearch(query=''){
+  const root=$('#globalSearchResults');if(!root)return;const q=String(query||'').trim().toLowerCase();
+  if(!q){const pinned=state.data.books.filter(b=>b.pinned&&!b.archived).slice(0,6);root.innerHTML=`<div class="search-empty-note">输入关键词可搜索书名、简称、甲方、平台和呱呱月账。</div>${pinned.length?`<div class="search-section-title">置顶项目</div>${pinned.map(b=>searchBookRow(b)).join('')}`:''}`;return;}
+  const books=state.data.books.filter(b=>searchHaystack(b).includes(q)||normalizeAlias(searchHaystack(b)).includes(normalizeAlias(q))).sort((a,b)=>Number(!!b.pinned)-Number(!!a.pinned)||latestBookTimestamp(b.id)-latestBookTimestamp(a.id)).slice(0,20);
+  const gs=state.data.guaguaEntries.filter(g=>[g.month,g.bookName,g.sourceName,g.settlementRange,g.settlementDate].join(' ').toLowerCase().includes(q)).slice(0,12);
+  root.innerHTML=(books.length?`<div class="search-section-title">项目</div>${books.map(b=>searchBookRow(b)).join('')}`:'')+(gs.length?`<div class="search-section-title">呱呱月账</div>${gs.map(g=>`<button class="search-result-row" type="button" data-open-book="${g.bookId}"><span class="search-result-icon guagua">呱</span><div><strong>${escapeHtml(g.bookName||bookById(g.bookId)?.title||'呱呱项目')}</strong><small>${escapeHtml(g.month||'')} · ${escapeHtml(g.sourceName||'')} · ${money(g.amount)}</small></div><i>›</i></button>`).join('')}`:'')||empty('没有找到匹配内容。');
+}
+function searchBookRow(b){return `<button class="search-result-row" type="button" data-open-book="${b.id}"><span class="search-result-icon ${b.source}">${sourceShort(b.source)}</span><div><strong>《${escapeHtml(b.title)}》</strong><small>${escapeHtml(b.client||'未填写甲方')} · ${sourceText(b.source)}${b.archived?' · 已归档':''}</small></div><i>›</i></button>`;}
+function openGlobalSearch(){openModal('searchModal');const input=$('#globalSearchInput');if(input){input.value='';renderGlobalSearch('');setTimeout(()=>input.focus(),120);}}
+// Events — 0.9 多来源 + 质感升级
 $('.tabbar').addEventListener('click',e=>{const btn=e.target.closest('.tab');if(btn)switchView(btn.dataset.view);});
-$('#brandHomeBtn').addEventListener('click',()=>switchView('home'));
+$('#brandHomeBtn').addEventListener('click',()=>switchView('home','back'));
+$('#topSearchBtn').addEventListener('click',openGlobalSearch);
 $('#topSettingsBtn').addEventListener('click',()=>{state.previousView=state.currentView;switchView('settings');});
-$('#settingsBackBtn').addEventListener('click',()=>switchView(['settings','metric-detail'].includes(state.previousView)?'home':state.previousView||'home'));
-$('#metricBackBtn').addEventListener('click',()=>switchView(state.metricReturnView||'home'));
+$('#settingsBackBtn').addEventListener('click',()=>switchView(['settings','metric-detail'].includes(state.previousView)?'home':state.previousView||'home','back'));
+$('#metricBackBtn').addEventListener('click',()=>switchView(state.metricReturnView||'home','back'));
 $('#homeCameraBtn').addEventListener('click',()=>switchView('camera'));
 $('#homeNewBookBtn').addEventListener('click',()=>openBookForm());$('#homeAllBooksBtn').addEventListener('click',()=>switchView('books'));$('#newBookBtn').addEventListener('click',()=>openBookForm());
+$('#bookSource').addEventListener('change',updateBookSourceUI);
 $('#takePhotoBtn').addEventListener('click',()=>$('#cameraInput').click());$('#choosePhotoBtn').addEventListener('click',()=>$('#photoInput').click());$('#manualRecordBtn').addEventListener('click',addManualDraft);
 $('#cameraInput').addEventListener('change',e=>{processImages([...e.target.files]);e.target.value='';});$('#photoInput').addEventListener('change',e=>{processImages([...e.target.files]);e.target.value='';});
 $('#clearOcrBtn').addEventListener('click',()=>{state.ocrDrafts=[];$('#ocrPreview').hidden=true;});$('#saveOcrBtn').addEventListener('click',saveOcrDrafts);
 $('#ocrRows').addEventListener('input',e=>{if(e.target.dataset.field)syncDraftFromInput(e.target,false)});$('#ocrRows').addEventListener('change',e=>{if(e.target.dataset.field)syncDraftFromInput(e.target,true)});
 $('#ocrRows').addEventListener('focusout',e=>{if(e.target.dataset.field==='durationText'){const formatted=formatDurationInput(e.target.value);e.target.value=formatted;syncDraftFromInput(e.target,true);}});
 $('#ocrRows').addEventListener('click',e=>{const id=e.target.dataset.removeDraft;if(id){state.ocrDrafts=state.ocrDrafts.filter(d=>d.id!==id);renderOcrDrafts();if(!state.ocrDrafts.length)$('#ocrPreview').hidden=true;return;}const action=e.target.dataset.conflictAction;if(action)setDraftConflictAction(e.target.dataset.id,action);});
+
+$('#openGuaguaImportBtn').addEventListener('click',()=>{state.guaguaMonth=currentYM();switchView('guagua-import');});
+$('#guaguaMonth').addEventListener('change',e=>{state.guaguaMonth=e.target.value||currentYM();for(const d of state.guaguaDrafts)d.month=state.guaguaMonth;renderGuaguaDrafts();});
+$('#guaguaTakePhotoBtn').addEventListener('click',()=>$('#guaguaCameraInput').click());$('#guaguaChoosePhotoBtn').addEventListener('click',()=>$('#guaguaPhotoInput').click());
+$('#guaguaCameraInput').addEventListener('change',e=>{processGuaguaImages([...e.target.files]);e.target.value='';});$('#guaguaPhotoInput').addEventListener('change',e=>{processGuaguaImages([...e.target.files]);e.target.value='';});
+$('#clearGuaguaBtn').addEventListener('click',()=>{state.guaguaDrafts=[];$('#guaguaPreview').hidden=true;renderGuaguaDrafts();});$('#saveGuaguaBtn').addEventListener('click',saveGuaguaDrafts);
+$('#guaguaRows').addEventListener('change',e=>{if(e.target.dataset.guaguaField)syncGuaguaDraft(e.target);});
+$('#guaguaRows').addEventListener('click',e=>{const id=e.target.dataset.removeGuagua;if(id){state.guaguaDrafts=state.guaguaDrafts.filter(d=>d.id!==id);renderGuaguaDrafts();if(!state.guaguaDrafts.length)$('#guaguaPreview').hidden=true;}});
+
 $('#bookFilters').addEventListener('click',e=>{const b=e.target.closest('[data-filter]');if(!b)return;state.bookFilter=b.dataset.filter;document.querySelectorAll('.filter-chip').forEach(x=>x.classList.toggle('active',x===b));renderBooks();});
+$('#bookSourceFilter').addEventListener('change',e=>{state.sourceFilter=e.target.value;renderBooks();});
 $('#bookPlatformFilter').addEventListener('change',e=>{state.platformFilter=e.target.value;renderBooks();});$('#bookClientFilter').addEventListener('change',e=>{state.clientFilter=e.target.value;renderBooks();});
 $('#bookSort').addEventListener('change',e=>{state.bookSort=e.target.value;if(state.bookSort!=='default'&&!['asc','desc'].includes(state.bookSortDir))state.bookSortDir='desc';renderLibraryFilters();renderBooks();});
 $('#bookSortDirection').addEventListener('click',()=>{if(state.bookSort==='default')return;state.bookSortDir=state.bookSortDir==='desc'?'asc':'desc';renderLibraryFilters();renderBooks();});
@@ -1096,18 +1323,25 @@ $('#statsRangeEnd').addEventListener('change',e=>{state.statsRangeEnd=e.target.v
 $('#annualYearSelect').addEventListener('change',e=>{state.annualYear=Number(e.target.value);renderAnnualReport();renderStats();});
 $('#saveCloudOcrBtn').addEventListener('click',saveCloudOcrEndpoint);$('#testCloudOcrBtn').addEventListener('click',testCloudOcrEndpoint);$('#saveWorkSettingsBtn').addEventListener('click',saveWorkSettingsFromUI);$('#undoLastImportBtn').addEventListener('click',undoLastImport);
 $('#exportDataBtn').addEventListener('click',exportBackup);$('#importDataBtn').addEventListener('click',()=>$('#importDataInput').click());$('#importDataInput').addEventListener('change',e=>{importBackupFile(e.target.files?.[0]);e.target.value='';});$('#csvScope').addEventListener('change',updateCsvScopeUI);$('#exportCsvBtn').addEventListener('click',exportCsv);
+$('#globalSearchInput').addEventListener('input',e=>renderGlobalSearch(e.target.value));
+
 document.addEventListener('click',e=>{
-  const back=e.target.closest('[data-back-view]');if(back){switchView(back.dataset.backView);return;}
+  const back=e.target.closest('[data-back-view]');if(back){switchView(back.dataset.backView,'back');return;}
   const metric=e.target.closest('[data-metric-detail]');if(metric){openMetricDetail(metric.dataset.metricDetail,state.currentView);return;}
   if(e.target.closest('[data-open-settings]')){state.previousView=state.currentView;switchView('settings');return;}
+  const exportSnap=e.target.closest('[data-export-snapshot]');if(exportSnap){exportSnapshot(exportSnap.dataset.exportSnapshot);return;}
+  const restoreSnap=e.target.closest('[data-restore-snapshot]');if(restoreSnap){restoreSnapshot(restoreSnap.dataset.restoreSnapshot);return;}
+  const pin=e.target.closest('[data-pin-book]');if(pin){e.stopPropagation();togglePinBook(pin.dataset.pinBook);return;}
+  const archive=e.target.closest('[data-archive-book]');if(archive){toggleArchiveBook(archive.dataset.archiveBook);return;}
   const editRecord=e.target.closest('[data-edit-record]');if(editRecord){openRecordEditor(editRecord.dataset.editRecord);return;}
   const restore=e.target.closest('[data-restore-record]');if(restore){restoreTrashRecord(restore.dataset.restoreRecord);return;}
-  const open=e.target.closest('[data-open-book]');if(open){openBookDetail(open.dataset.openBook);return;}
+  const open=e.target.closest('[data-open-book]');if(open){if($('#searchModal')?.classList.contains('open'))closeModal('searchModal');openBookDetail(open.dataset.openBook);return;}
   const edit=e.target.closest('[data-edit-book]');if(edit){closeModal('bookDetailModal');openBookForm(bookById(edit.dataset.editBook));return;}
   const settle=e.target.closest('[data-add-settlement]');if(settle){openSettlement(settle.dataset.addSettlement);return;}
   const settleClient=e.target.closest('[data-settle-client]');if(settleClient){state.settlementView='book';state.settlementClientFilter=settleClient.dataset.settleClient;renderSettlementFilters();renderSettlementCenter();return;}
   const qm=e.target.closest('[data-quick-month]');if(qm){state.statsCustomMonth=qm.dataset.quickMonth;state.statsPeriod='customMonth';renderStatsHistory();renderStats();return;}
-  const group=e.target.closest('[data-group-type]');if(group){state.bookFilter='all';document.querySelectorAll('.filter-chip').forEach(x=>x.classList.toggle('active',x.dataset.filter==='all'));if(group.dataset.groupType==='platform'){state.platformFilter=group.dataset.groupName;state.clientFilter='all';}else{state.clientFilter=group.dataset.groupName;state.platformFilter='all';}renderLibraryFilters();renderBooks();switchView('books');return;}
+  const sourceGroup=e.target.closest('[data-source-group]');if(sourceGroup){state.bookFilter='all';state.sourceFilter=sourceGroup.dataset.sourceGroup;state.platformFilter='all';state.clientFilter='all';renderLibraryFilters();renderBooks();switchView('books');return;}
+  const group=e.target.closest('[data-group-type]');if(group){state.bookFilter='all';state.sourceFilter='all';document.querySelectorAll('.filter-chip').forEach(x=>x.classList.toggle('active',x.dataset.filter==='all'));if(group.dataset.groupType==='platform'){state.platformFilter=group.dataset.groupName;state.clientFilter='all';}else{state.clientFilter=group.dataset.groupName;state.platformFilter='all';}renderLibraryFilters();renderBooks();switchView('books');return;}
   const close=e.target.closest('[data-close]');if(close)closeModal(close.dataset.close);
 });
 if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));}
